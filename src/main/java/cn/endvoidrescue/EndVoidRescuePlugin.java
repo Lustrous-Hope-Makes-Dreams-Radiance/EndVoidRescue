@@ -220,7 +220,12 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
                 }
             }
             if (item.getType() == Material.ENCHANTED_BOOK && storedMeta.getStoredEnchants().isEmpty()) {
-                return ItemStack.of(Material.BOOK, Math.max(1, item.getAmount()));
+                ItemStack book = ItemStack.of(Material.BOOK, item.getAmount());
+                book.copyDataFrom(item, type -> type != DataComponentTypes.STORED_ENCHANTMENTS
+                        && type != DataComponentTypes.REPAIR_COST
+                        && type != DataComponentTypes.ENCHANTMENT_GLINT_OVERRIDE
+                        && type != DataComponentTypes.RARITY);
+                return book;
             }
         } else {
             for (Enchantment enchantment : new HashSet<>(meta.getEnchants().keySet())) {

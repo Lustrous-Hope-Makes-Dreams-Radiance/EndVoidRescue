@@ -6,7 +6,7 @@
 
     <groupId>cn.endvoidrescue</groupId>
     <artifactId>EndVoidRescue</artifactId>
-    <version>0.2.0-beta.4</version>
+    <version>0.2.0-beta.5</version>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
