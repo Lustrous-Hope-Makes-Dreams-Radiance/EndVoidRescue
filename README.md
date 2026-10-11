@@ -13,7 +13,7 @@
 
 - 仅在配置的世界和死亡原因匹配时触发，默认是末地（`THE_END`）和虚空伤害（`VOID`）。
 - 丢弃玩家背包中的黑名单物品（包括收纳袋和潜影盒内的），包括鞘翅、潜影壳、末影箱、黑曜石、末影珍珠和末影水晶。
-- 仅对带有经验修补（`MENDING`）的物品执行砂轮式祛魔。
+- 仅对带有经验修补（`MENDING`）的物品执行砂轮式祛魔（默认优先使用原版砂轮逻辑，见 `use-vanilla-grindstone`）。
 - 按配置合并相同的可堆叠物品。
 - 玩家重生时同步在重生点所在方块内随机散落物品。
 - 待返还物品保存在 `pending-drops.yml`。玩家在**死亡之后、重生事件触发之前**离线，重连并重生后仍可继续领取。发放失败时记录保留，下次死亡合并后重试。
@@ -54,6 +54,7 @@ blacklist:
   - ENDER_PEARL
   - END_CRYSTAL
 remove-non-curse-enchant: true
+use-vanilla-grindstone: true
 burst:
   radius: 0.5
   merge-similar: true
@@ -66,6 +67,7 @@ burst:
 - `trigger-cause`：触发救援的死亡原因，使用 Bukkit 的 `DamageCause` 名称。
 - `blacklist`：死亡时直接丢弃的材料名称列表。
 - `remove-non-curse-enchant`：是否启用经验修补触发的砂轮式祛魔规则。
+- `use-vanilla-grindstone`：是否优先用原版（NMS）砂轮逻辑执行祛魔。默认 `true`：反射调用服务端实现，输出物品由原版构造，显示属性保留最完整。反射依赖服务端内部映射，MC 小版本升级后若解析失败会自动回退到内置实现并打印一条 warning（启动日志的 `grindstone engine:` 也会标明当前引擎）；若升级后发现祛魔行为异常，置 `false` 可立即停用反射。
 - `burst.radius`：重生点所在格内的水平散落程度（格）。有效上限 `0.5`，更大的值会被截断，避免物品落到邻格卡墙。
 - `burst.merge-similar`：是否在发放前合并相同的可堆叠物品。
 - `burst.pickup-delay-ticks`：生成物品实体后的拾取延迟，单位为 tick。
@@ -77,4 +79,3 @@ burst:
 ## 文档
 
 - [插件原理图](docs/plugin-diagram.md)
-<!-- - [测试说明](docs/testing.md) -->

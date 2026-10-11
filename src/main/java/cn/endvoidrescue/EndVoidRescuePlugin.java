@@ -39,6 +39,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     private PendingDropStore store;
     private Set<Material> blacklist;
     private boolean loggedBurstRadiusClamp;
+    private boolean useVanillaGrindstone;
 
     @Override
     public void onEnable() {
@@ -46,7 +47,14 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
         store = new PendingDropStore(getDataFolder(), getLogger());
         reloadSettings();
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("EndVoidRescue enabled");
+        getLogger().info("EndVoidRescue enabled; grindstone engine: " + grindstoneEngine());
+    }
+
+    private String grindstoneEngine() {
+        if (!useVanillaGrindstone) {
+            return "built-in (use-vanilla-grindstone=false)";
+        }
+        return VanillaGrindstone.available(getLogger()) ? "vanilla" : "built-in (vanilla unavailable)";
     }
 
     private void reloadSettings() {
@@ -59,6 +67,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Unknown blacklist material: " + name);
             }
         }
+        useVanillaGrindstone = getConfig().getBoolean("use-vanilla-grindstone", true);
         loggedBurstRadiusClamp = false;
     }
 
@@ -213,6 +222,21 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
         if (!hasMending) {
             return item;
         }
+        if (useVanillaGrindstone) {
+            ItemStack vanilla = VanillaGrindstone.disenchant(item, getLogger());
+            if (vanilla != null) {
+                return vanilla;
+            }
+        }
+        return stripNonCurseEnchantmentsBuiltIn(item, meta);
+    }
+
+    /**
+     * 内置砂轮实现：原版不可用（或 use-vanilla-grindstone 关闭）时的回退路径。
+     * 语义与原版一致：非诅咒附魔全清、诅咒保留、repair_cost 归零、
+     * 附魔书被祛到无附魔时退化为普通书并保留显示属性。
+     */
+    private ItemStack stripNonCurseEnchantmentsBuiltIn(ItemStack item, ItemMeta meta) {
         if (meta instanceof EnchantmentStorageMeta storedMeta) {
             for (Enchantment enchantment : new HashSet<>(storedMeta.getStoredEnchants().keySet())) {
                 if (!isCurse(enchantment)) {
@@ -220,12 +244,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
                 }
             }
             if (item.getType() == Material.ENCHANTED_BOOK && storedMeta.getStoredEnchants().isEmpty()) {
-                ItemStack book = ItemStack.of(Material.BOOK, item.getAmount());
-                book.copyDataFrom(item, type -> type != DataComponentTypes.STORED_ENCHANTMENTS
-                        && type != DataComponentTypes.REPAIR_COST
-                        && type != DataComponentTypes.ENCHANTMENT_GLINT_OVERRIDE
-                        && type != DataComponentTypes.RARITY);
-                return book;
+                return degradeToPlainBook(item);
             }
         } else {
             for (Enchantment enchantment : new HashSet<>(meta.getEnchants().keySet())) {
@@ -236,6 +255,29 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
         }
         item.setItemMeta(meta);
         item.setData(DataComponentTypes.REPAIR_COST, 0);
+        return item;
+    }
+
+    /**
+     * 附魔书祛魔后无附魔残留时退化为普通书，同时保留显示属性。
+     * 用 setType 而非「新建堆叠 + copyDataFrom」：后者在 MockBukkit 未实现，会让相关测试被记为
+     * skipped 而非 failed，掩盖真实回归；而 setType 实测不会重置名称/lore/custom_model_data。
+     * setType 会保留原物品的 repair_cost，所以这里必须显式归零。
+     * 由 enchantedBook_degradeKeepsDisplayAttributes / degradedBook_resetsRepairCost 钉住。
+     */
+    private ItemStack degradeToPlainBook(ItemStack item) {
+        item.setType(Material.BOOK);
+        item.setData(DataComponentTypes.REPAIR_COST, 0);
+        // setType 在真实 Paper 上是否会清掉附魔组件无法在 MockBukkit 验证，这里显式清一遍兜底，
+        // 避免退化的普通书仍带附魔语义（附魔闪光、悬停显示附魔）。unsetData 对不存在的组件无害。
+        item.unsetData(DataComponentTypes.STORED_ENCHANTMENTS);
+        item.unsetData(DataComponentTypes.ENCHANTMENTS);
+        item.unsetData(DataComponentTypes.ENCHANTMENT_GLINT_OVERRIDE);
+        // RARITY 是附魔派生的展示属性，普通书不该带；仅在原物品显式覆盖过时才需要清掉
+        // （未覆盖时它由类型推导，setType 后自动回到普通书的默认值）。
+        if (item.isDataOverridden(DataComponentTypes.RARITY)) {
+            item.resetData(DataComponentTypes.RARITY);
+        }
         return item;
     }
 
