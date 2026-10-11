@@ -21,7 +21,7 @@ flowchart TD
         H4 --> I2
         G --> I["加入 pending 列表"]
         I --> J["mergeIfConfigured 合并同类堆叠"]
-        J --> K["PendingDropStore.put<br/>写入 pending-drops.yml"]
+        J --> K["PendingDropStore.put<br/>更新内存中的待返还物品"]
     end
 
     subgraph 重生阶段["重生阶段 (PlayerRespawnEvent)"]
@@ -29,12 +29,15 @@ flowchart TD
         L --> L2{"pending 是否为空?"}
         L2 -- 是 --> Q["store.remove 清理空记录"]
         L2 -- 否 --> M["store.get 读取待爆出物品"]
-        M --> N["延迟 1 tick 确保传送完成"]
-        N --> O["burst 在重生点散落物品"]
+        M --> O["同步 burst 在重生点散落物品"]
         O --> P["拾取延迟 + 随机散落"]
-        O --> Q["try/finally: store.remove 清理记录<br/>burst 异常也不残留"]
+        O --> R{"burst 是否抛异常?"}
+        R -- 否 --> S["store.remove 清理记录"]
+        R -- 是 --> T["记 severe 后 return<br/>保留记录，下次死亡合并重试"]
     end
 ```
+
+插件关闭时通过 `onDisable` 调用 `store.save`，将内存记录写入 `pending-drops.yml`；启动时读取文件。
 
 ## 潜影盒处理原理图
 
@@ -66,6 +69,13 @@ flowchart TD
     E --> R["盒本身丢弃, 不保留"]
     R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 写入 yml"]
 ```
+
+## 收纳袋处理说明
+
+- 背包中的收纳袋保留在原槽位，仅重写其内部物品列表。
+- 黑名单物品从收纳袋内容中移除，带经验修补的物品执行砂轮式祛魔。
+- 嵌套收纳袋递归执行相同规则，最多处理 15 层。
+- 潜影盒内容中出现收纳袋时，先递归净化收纳袋，再将整个收纳袋加入待返还列表。
 
 ## 潜影盒物理效果流程图
 

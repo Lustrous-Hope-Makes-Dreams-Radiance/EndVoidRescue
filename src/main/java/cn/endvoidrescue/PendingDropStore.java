@@ -9,19 +9,23 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 final class PendingDropStore {
     private final File file;
     private final YamlConfiguration data;
+    private final Logger logger;
 
-    PendingDropStore(File dataFolder) {
+    PendingDropStore(File dataFolder, Logger logger) {
         this.file = new File(dataFolder, "pending-drops.yml");
         this.data = YamlConfiguration.loadConfiguration(file);
+        this.logger = logger;
     }
 
     synchronized void put(UUID playerId, List<ItemStack> items) {
         String path = "players." + playerId;
-        // 空列表且玩家无记录时，数据无变化，跳过写盘。
+        // 空列表且玩家无记录时，数据无变化。
         if (items.isEmpty() && !data.contains(path)) {
             return;
         }
@@ -39,7 +43,7 @@ final class PendingDropStore {
         String path = "players." + playerId;
         ConfigurationSection section = data.getConfigurationSection(path);
         if (section == null) {
-            return List.of();
+            return new ArrayList<>();
         }
         List<ItemStack> result = new ArrayList<>();
         // getKeys(false) 返回 Set，顺序不保证；但本场景中物品最终随机散落，顺序无关紧要。
@@ -73,11 +77,17 @@ final class PendingDropStore {
         return false;
     }
 
+    /**
+     * 内存中的 data 是主副本，磁盘只是尽力持久化。
+     * 写盘失败时记 severe 并留下内存数据：本次进程内仍能领取；
+     * 重启后未落盘的记录丢失，是磁盘失败时的必然取舍。
+     */
     synchronized void save() {
         try {
             data.save(file);
         } catch (IOException exception) {
-            throw new IllegalStateException("Unable to save pending drops", exception);
+            logger.log(Level.SEVERE, "Unable to save pending drops to " + file.getAbsolutePath()
+                    + "; in-memory records are kept for this process and will be lost on restart", exception);
         }
     }
 }
