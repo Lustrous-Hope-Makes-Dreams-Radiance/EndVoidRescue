@@ -1,33 +1,41 @@
 # EndVoidRescue 插件原理图
 
+> 本次重写依据：当前 HEAD `c1f07b642185e0a73c88c17b46643152bc0e575f`，核对报告见上。
+
+## 死亡与重生总流程
+
 ```mermaid
 flowchart TD
     subgraph 死亡阶段["死亡阶段 (PlayerDeathEvent)"]
-        A["玩家在末地虚空死亡"] --> B{"世界==THE_END<br/>且死因==VOID?"}
-        B -- 是 --> C["keepInventory=true<br/>getDrops().clear()"]
+        A["玩家在末地虚空死亡"] --> B{"世界环境匹配<br/>且死因匹配?"}
+        B -- 否 --> B2["不改写任何东西<br/>交还原版结算"]
+        B -- 是 --> C["setKeepInventory(true)<br/>getDrops().clear()"]
         C --> D["逐槽位处理背包 processItem<br/>返回值写回原槽位"]
-        D --> E{"黑名单物品?"}
+        D --> E{"黑名单物品?<br/>isBlacklisted"}
         E -- 是 --> X["返回 null，槽位清空"]
-        E -- 否 --> F{"潜影盒?"}
-        F -- 是且非空 --> G["提取内容逐件净化<br/>盒本身丢弃"]
-        F -- 是且空 --> X
-        F -- 否 --> H{"带经验修补?"}
-        H -- 是 --> H2["砂轮祛魔: 移除所有非诅咒附魔<br/>重置 repair_cost 为 0"]
+        E -- 否 --> F{"是潜影盒?<br/>Tag.SHULKER_BOXES"}
+        F -- 是 --> G["processShulkerContents<br/>盒内物品逐件净化后加入 pending<br/>盒体丢弃（返回 null）"]
+        F -- 否 --> F2{"是收纳袋?<br/>Tag.ITEMS_BUNDLES"}
+        F2 -- 是 --> G2["processBundle(depth=0)<br/>袋体保留在原槽位，只重写袋内内容"]
+        F2 -- 否 --> H{"祛魔开关开启<br/>且带经验修补?"}
         H -- 否 --> I2["原样保留，写回槽位"]
+        H -- 是 --> H2["砂轮祛魔：移除全部非诅咒附魔<br/>保留两种诅咒，repair_cost 归零"]
         H2 --> H3{"附魔书祛魔后为空?"}
-        H3 -- 是 --> H4["退化为普通书"]
+        H3 -- 是 --> H4["退化为普通书<br/>保留数量与显示属性"]
         H3 -- 否 --> I2
         H4 --> I2
+        G2 --> I2
         G --> I["加入 pending 列表"]
-        I --> J["mergeIfConfigured 合并同类堆叠"]
-        J --> K["PendingDropStore.put<br/>只更新内存中的待返还物品（不写盘）"]
+        I --> J{"pending 是否为空?"}
+        J -- 是 --> J2["store.remove(playerId)<br/>不留空记录"]
+        J -- 否 --> K["mergeIfConfigured 合并同类堆叠<br/>PendingDropStore.put 只更新内存（不写盘）"]
     end
 
     subgraph 重生阶段["重生阶段 (PlayerRespawnEvent)"]
         K --> L["玩家重生"]
-        L --> L2{"pending 是否为空?"}
+        L --> L2{"store.get 的结果是否为空?"}
         L2 -- 是 --> Q["store.remove 清理空记录"]
-        L2 -- 否 --> M["store.get 读取待爆出物品"]
+        L2 -- 否 --> M["取出待散落物品"]
         M --> O["同步 burst 在重生点散落物品"]
         O --> P["拾取延迟 + 随机散落"]
         O --> R{"burst 是否抛异常?"}
@@ -38,35 +46,40 @@ flowchart TD
 
 **写盘时机**：死亡、重生阶段只更新内存（`put` / `remove` 都不写盘）；插件关闭时通过 `onDisable` 调用 `store.save`，把内存快照一次性写入 `pending-drops.yml`，启动时读取文件。因此玩家死亡后离线、服务器异常终止（`onDisable` 未执行）时，未落盘的记录会丢失，详见 README「持久化」与 docs/testing.md「已知限制」。
 
+**关于 `store.get`**：`onPlayerDeath` 在逐槽位处理之前，会先把该玩家已有的待返还记录读进 `pending`（`List<ItemStack> pending = store.get(playerId);`），因此本次死亡新收集的物品与上次发放失败留下的旧记录会一起合并写回——这是「发放失败重试」的实现方式。上图从「逐槽位处理背包」画起，未单独画出这次读取。
+
 ## 潜影盒处理原理图
 
 ```mermaid
 flowchart TD
-    A["背包槽位中的潜影盒 ItemStack"] --> B{"isShulker?<br/>类型名以 SHULKER_BOX 结尾"}
+    A["背包槽位中的潜影盒 ItemStack"] --> B{"Tag.SHULKER_BOXES.isTagged(type)?"}
     B -- 否 --> Z["按普通物品处理"]
-    B -- 是 --> C{"hasContents?<br/>盒内是否有物品"}
+    B -- 是 --> C{"盒内是否有物品?"}
     C -- 否 --> X["丢弃空潜影盒"]
-    C -- 是 --> D["extractShulkerContents<br/>读取 BlockStateMeta 中的 ShulkerBox"]
-    D --> E["遍历盒内 27 格内容"]
+    C -- 是 --> D["processShulkerContents<br/>读取 BlockStateMeta 中的 ShulkerBox"]
+    D --> E["遍历盒内全部格子<br/>（原版潜影盒 27 格；代码遍历 getContents()，不硬编码格数）"]
     E --> F{"内容为空?"}
     F -- 是 --> G["跳过"]
     F -- 否 --> H{"黑名单物品?"}
     H -- 是 --> I["丢弃该内容"]
     H -- 否 --> J["clone 克隆副本"]
-    J --> K{"带经验修补?"}
-    K -- 否 --> L["原样保留"]
-    K -- 是 --> M["stripNonCurseEnchantments<br/>移除非诅咒附魔<br/>重置 repair_cost 为 0"]
+    J --> J2{"是收纳袋?<br/>BundleMeta"}
+    J2 -- 是 --> J3["processBundle 递归净化袋内物品"]
+    J2 -- 否 --> K{"带经验修补?"}
+    K -- 否 --> L["原样保留（无 MENDING）<br/>盒中盒也走此路径：整体进 pending，不递归展开"]
+    K -- 是 --> M["stripNonCurseEnchantments<br/>移除非诅咒附魔<br/>repair_cost 归零"]
     M --> N{"附魔书祛魔后<br/>不再有附魔?"}
     N -- 是 --> O["退化为普通书"]
     N -- 否 --> P["保留处理后的物品"]
-    O --> Q["加入 pending 列表"]
+    J3 --> Q["加入 pending 列表"]
+    O --> Q
     P --> Q
     L --> Q
     G --> E
     I --> E
     Q --> E
     E --> R["盒本身丢弃, 不保留"]
-    R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 写入 yml"]
+    R --> S["所有槽位处理完毕后<br/>mergeIfConfigured 合并 -> store.put（只更新内存，落盘在关服）"]
 ```
 
 ## 收纳袋处理说明
@@ -75,19 +88,21 @@ flowchart TD
 - 黑名单物品从收纳袋内容中移除，带经验修补的物品执行砂轮式祛魔。
 - 嵌套收纳袋递归执行相同规则，最多处理 15 层。
 - 潜影盒内容中出现收纳袋时，先递归净化收纳袋，再将整个收纳袋加入待返还列表。
-
-> 注：上方「潜影盒处理原理图」中的 `extractShulkerContents` / `hasContents` 是历史名称；当前实现为 `processItem` / `processShulkerContents`（判定用 `Tag.SHULKER_BOXES`）。
+- 潜影盒内容中出现潜影盒（盒中盒）时，内层盒按普通物品整体保留进待返还列表：不递归展开、不提取内层内容、不净化。
 
 ## 潜影盒物理效果流程图
 
 ```mermaid
 flowchart TD
-    A["burst() 开始<br/>读取 radius / pickup-delay"] --> A2["水平原点对齐到方块中心<br/>blockX+0.5 / blockZ+0.5"]
-    A2 --> A3{"radius > 0.5?"}
+    A["burst() 开始<br/>读取 radius / pickup-delay"] --> A0{"重生点世界已加载?<br/>location.isWorldLoaded()"}
+    A0 -- 否 --> A1["throw IllegalStateException<br/>调用方 catch：记 severe、保留记录"]
+    A0 -- 是 --> A2["水平原点对齐到方块中心<br/>blockX+0.5 / blockZ+0.5"]
+    A2 --> A5["radius = Math.max(0.0, 配置值)<br/>负值归零"]
+    A5 --> A3{"radius > 0.5?"}
     A3 -- 是 --> A4["截断为 0.5<br/>首次截断打 warning"]
     A3 -- 否 --> B
     A4 --> B["确保区块已加载<br/>world.getChunkAt(location)"]
-    B --> C["遍历每个待爆出 ItemStack"]
+    B --> C["遍历每个待散落 ItemStack"]
     C --> D["生成随机角度<br/>θ ~ U(0, 2π)"]
     D --> E["均匀面积分布半径<br/>r = sqrt(u) * radius, u ~ U(0,1)"]
     E --> F["计算掉落坐标<br/>x = blockX+0.5 + cos(θ)·r<br/>y = y0 + 1<br/>z = blockZ+0.5 + sin(θ)·r"]
@@ -97,7 +112,7 @@ flowchart TD
     I --> J["受重力与阻力影响<br/>自然下落"]
     J --> K{"还有物品?"}
     K -- 是 --> C
-    K -- 否 --> L["记录日志<br/>Released N item stack(s)"]
+    K -- 否 --> L["记录日志<br/>Released N pending item stack(s)"]
     L --> M["结束"]
 ```
 
@@ -108,8 +123,8 @@ flowchart TD
 | $\theta$ | 随机角度 | $\theta \sim U(0, 2\pi)$，决定物品散落的水平方向 |
 | $u, u_1, u_2$ | 均匀随机数 | $\sim U(0, 1)$，由 `random.nextDouble()` 生成 |
 | $r$ | 散落半径 | $r = \sqrt{u} \cdot R$，使用平方根实现**均匀面积分布**，避免物品集中在圆心 |
-| $R$ | 格内散落程度 | 来自 `burst.radius`，有效上限 $0.5$（更大值截断） |
+| $R$ | 格内散落程度 | 来自 `burst.radius`，有效上限 $0.5$（更大值截断，负值归零） |
 | $x_0, y_0, z_0$ | 重生点坐标 | 水平对齐到所在方块中心；Y 为脚底 |
 | $x, y, z$ | 物品生成坐标 | $x = \mathrm{blockX}+0.5 + \cos(\theta) \cdot r$<br>$y = y_0 + 1$<br>$z = \mathrm{blockZ}+0.5 + \sin(\theta) \cdot r$ |
 | $v_x, v_y, v_z$ | 初速度分量 | $v_x = (u_1 - 0.5) \cdot 0.08$<br>$v_y = 0$<br>$v_z = (u_2 - 0.5) \cdot 0.08$ |
-| $N$ | 物品堆叠数 | 本次爆出的 `ItemStack` 数量 |
+| $N$ | 物品堆叠数 | 本次散落的 `ItemStack` 数量 |
