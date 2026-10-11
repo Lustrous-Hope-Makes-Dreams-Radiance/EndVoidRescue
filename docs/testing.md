@@ -26,7 +26,11 @@
 | `ItemStack#copyDataFrom` **未实现**，抛 `UnimplementedOperationException`（继承 `TestAbortedException`） | 生产代码一旦调用它，相关测试被记为 **skipped 而非 failed**——`mvn test` 显示 BUILD SUCCESS，容易误读为通过。曾导致 4 条测试静默失效（含收纳袋深度边界的 `deepestReachableLevel`） | 生产代码已改回 `setType`，不再调用该方法。**维护规则：看测试结果必须核对 Skipped 计数，不能只看 Failures**；新增生产代码调用 MockBukkit 未实现的方法前，先确认不会把断言变成空跑（探针实测） |
 | `REPAIR_COST` 在**附魔书**上的 `setData`/`getData` 往返**正常**（与收纳袋丢组件的怪癖不同） | 可以正常写出「前置：repair_cost=39」的断言 | `degradedBook_resetsRepairCost` 的前置断言实测能读回 39（探针实测） |
 
-发放改为在 `PlayerRespawnEvent` 里同步执行后，生产代码不再注册调度任务，「调度任务异常从 `performTicks` 传播」这条怪癖**暂无测试使用**（原先的 `assertDoesNotThrow(() -> performTicks(...))` 断言已随之删除）。测试里残留的 `performTicks(2)` 调用是空跑，保留不影响结论。
+该表末行的「已改回 `setType`」**截至本次提交与实际不符**：当前 HEAD 的 `stripNonCurseEnchantments` 仍调用 `ItemStack#copyDataFrom`，4 条 skipped（`deepestReachableLevel_isFullyProcessed`、`enchantedBook_degradesWhenEmpty_keepsAmount`、`degradedBook_resetsRepairCost`、`enchantedBook_degradeKeepsDisplayAttributes`）即源于此。本次提交只适配 PendingDropStore 语义，未修该问题。
+
+本节后续提到的 `vanillaGrindstone` / `use-vanilla-grindstone` / `degradeToPlainBook` / `extractShulkerContents` 在当前 HEAD 中**不存在**（属历史版本），相应表格与测试名（`vanillaGrindstone_unavailableUnderMockBukkit`、`useVanillaGrindstoneFlag_readByReloadSettings`）为过时描述。
+
+发放在 `PlayerRespawnEvent` 里同步执行后，生产代码不再注册调度任务，「调度任务异常从 `performTicks` 传播」这条怪癖**暂无测试使用**（原先的 `assertDoesNotThrow(() -> performTicks(...))` 断言已随之删除）。测试里残留的 `performTicks(2)` 调用是空跑，保留不影响结论。
 
 ## 收纳袋嵌套：容量规则与处理深度
 
@@ -154,11 +158,16 @@
 
 ### 5. 持久化与合并
 
-- `PendingDropStore` YAML 往返：物品（含附魔）完整恢复，`remove` 后清空。
-- **空 put 且无记录不写盘**（`pendingDropStore_emptyPutWithoutRecord_doesNotWriteFile`）：文件不得被创建——防死亡时背包为空却反复重写文件。
-- **remove 最后一条记录不留空段**（`pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection`）：文件不得残留 `players:` 空段——防每次重生/登录事件反复重写。
+> **写盘时机（决策 A）**：`put` 与 `remove` **都不写盘**，只改内存（内存是主副本）；唯一写盘时机是插件关闭时的 `onDisable → PendingDropStore.save()`。因此断言分两类：**内存视图**（`pluginStore()`，进程内真相）与**磁盘视图**（`diskStore()` / `pendingOf()`，只在显式 `save()` 或 `onDisable` 之后才可信）。断言磁盘前必须确认该路径已经落过盘，否则断言恒真。
+
+- **YAML 往返**（`pendingDropStore_roundTripAndRemoval`）：`put` → `save()`（模拟关服）→ 新实例从磁盘读回物品（含附魔）；`remove` → `save()` → 读回为空。覆盖「正常关闭 → 重启」这条决策 A 唯一保证的路径。
+- **空 put 且无记录不写盘**（`pendingDropStore_emptyPutWithoutRecord_doesNotWriteFile`）：文件不得被创建——防死亡时背包为空却反复重写文件。注意：`put` 不写盘后该断言恒真，真正守住的是 `put` 开头的早退分支（空列表且无记录时直接 return），删掉该分支会由场景 3 的空段断言抓到。
+- **remove 最后一条记录不留空段**（`pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection`）：钉住决策 A 的三个方向——(1) `put` 不写盘：put 后解析磁盘的 `players` 段为 `null`；(2) `remove` 不写盘：显式 `save()` 留下磁盘快照后，`remove` 之后磁盘上那条旧记录**必须仍在**（陈旧记录只活到关服，见「已知风险」）；(3) `save` 写的是内存快照：再次 `save()` 后该记录与空 `players` 段一起消失（文件不得残留 `players:` 空段）。变异：把 `save()` 加回 `PendingDropStore.remove()` 末尾，(2) 变红（实测确认）。
+- **关服落盘 + 重启读回**（`shutdownHook_persistsPendingRecordToDisk`）：死亡产生内存记录（此时文件不存在）→ 调生产代码 `onDisable()` → 文件必须被创建、重启后读回同一条物品。变异：删掉 `onDisable` 里的 `store.save()` 后本测试变红（实测确认）——这是唯一钉住「关服写盘」的测试。
+  - 探针实测：`MockBukkit.unmock()`（`disablePlugins` → `onDisable`）**不会**触发本插件的 `onDisable`（文件始终不被创建），因此该测试显式调用 `plugin.onDisable()`。不要改回 `unmock()`，那会让断言恒真。
 - `mergeIfConfigured`：100 个圆石 → 64+36，总量守恒——防合并丢数量。
-- **旧记录与本次新物品合并**（`death_mergesStaleRecordWithNewItems`）：上次发放失败留下的 STONE×5 与本次潜影盒里的 EMERALD×3 必须一起写回 pending（内存与磁盘两份视图都断言）——这是「失败重试」机制的核心闭环。变异：`onPlayerDeath` 里 `store.get(playerId)` 改成 `new ArrayList<>()` 后旧记录被丢弃，本测试变红（变异实测确认，`emptyDeath_keepsExistingPendingRecord` 同时变红）。
+- **旧记录与本次新物品合并**（`death_mergesStaleRecordWithNewItems`）：上次发放失败留下的 STONE×5 与本次潜影盒里的 EMERALD×3 必须一起写回 pending——这是「失败重试」机制的核心闭环。内存视图断言合并结果（2 条、STONE×5、EMERALD×3）；再显式 `pluginStore().save()` 后用 `pendingOf` 断言落盘形态（旧记录与新物品都在）。变异：`onPlayerDeath` 里 `store.get(playerId)` 改成 `new ArrayList<>()` 后旧记录被丢弃，本测试变红（变异实测确认，`emptyDeath_keepsExistingPendingRecord` 同时变红）。
+- **空死亡不误删/不误造记录**：`emptyDeath_keepsExistingPendingRecord`（有旧记录 → 保留）、`emptyDeathWithoutStaleRecord_removesRecord`、`respawnWithNoPending_callsStoreRemoveWithoutDropping`（不误删其他玩家记录）。三条一律走 `pluginStore()` 内存视图：`put` 不写盘时 `diskStore()` 是一份干净内存，用它做「记录还在」的断言会恒假。
 
 ### 6. 端到端事件流
 
@@ -188,7 +197,18 @@
 
 ### 死亡后离线再领取
 
-发放在 `PlayerRespawnEvent` 里同步执行，没有登录补发。因此「重连后仍可领取」只覆盖情况 A：死亡之后、重生事件触发之前离线，记录留在文件里，重进并触发重生后散落。
+发放在 `PlayerRespawnEvent` 里同步执行，没有登录补发，插件也不注册 `PlayerQuitEvent` 监听器。因此「重连后仍可领取」只覆盖情况 A：死亡之后、重生事件触发之前离线，重进并触发重生后散落——**前提是服务器进程没有结束**：这条路径完全依赖内存副本，记录此时尚未写盘。
+
+### 跨进程持久化不再保证（决策 A）
+
+`put` / `remove` 只改内存，唯一写盘时机是关服 `onDisable → save()`。因此：
+
+| 终止方式 | 磁盘状态 | 后果 |
+| --- | --- | --- |
+| 正常关闭（`stop` / 重启） | 内存快照完整落盘 | 待领取记录仍在；已发放记录的陈旧副本被清掉 |
+| 异常终止（崩溃 / `kill -9` / OOM / 容器强杀 / 断电） | 停在最后一次写盘 | 自那以后的所有变更丢失，包括刚死亡产生的待领取记录；「发放失败重试」的旧记录若从未落盘也一并失效 |
+
+玩家死亡后离线、服务器在离线期间异常终止、玩家重连的场景会**永久丢失**该次待领取物品。这是决策 A 明确的取舍：以「关服时一次性写盘」换取死亡/重生路径零写盘。若将来要恢复跨进程保证，做法是把 `save()` 加回 `PendingDropStore.put`（`remove` 是否写盘是独立决定，见「已知风险」）。
 
 ### 世界未加载守卫
 
@@ -204,6 +224,16 @@
 
 ## 已知风险
 
+### 已发放记录在下一次落盘前仍留在文件里
+
+`remove` 不写盘，所以玩家领取（`burst` 成功）之后 `pending-drops.yml` 直到下一次关服才被改写。磁盘上的陈旧记录与内存已经不同步。
+
+后果：若在「发放成功」与「下一次落盘」之间服务端异常终止，重启后该记录会被读回来，玩家下次在末地死亡时**再领一份**（重复发放）。
+
+评估：窗口在正常关闭时关闭，只有异常终止才暴露；本插件对整单记录本就有同类重复风险（`burst` 中途失败会整单重发，见下一条）。若要收紧，把 `save()` 同时加回 `PendingDropStore.remove` 即可——代价是每次重生/空死亡都重写整个文件，这正是决策 A 想省掉的写盘。
+
+`pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection` 用「remove 后磁盘仍含该记录」这一条断言把本行为钉住（变异：把 `save()` 加回 `remove()` 后该断言变红）。
+
 ### 发放循环中途失败会重发已落地物品
 
 `onPlayerRespawn` 在 `burst` 正常返回后才 `store.remove`。`burst` 抛异常时 catch 后直接 return，整单记录留下，下次死亡把旧记录读回来合并再发。
@@ -218,3 +248,4 @@
 2. **绝对值 + 相对值双钉**：边界测试不能只动态读取常量（构造随常量缩放，常量改错时测试会跟着一起绿），必须同时存在硬编码绝对层数的用例（当前为嵌套 15 层）。动态用例钉住跳过条件相对常量的位置（提前/后移），硬编码用例钉住常量不得改小；常量改大无害且无测试覆盖，属可接受取舍（见上文变异实测矩阵）。
 3. **变异验证**：新增或修改边界测试后，把生产常量改坏（如 16→15），测试**必须变红**；恢复后必须全绿。未通过变异验证的边界测试视为无效。
 4. **不为测试改生产逻辑**：仅允许可见性调整（如反射调用私有方法）；生产行为问题应修生产代码，而不是迁就测试。
+5. **持久化断言先确认写盘时机**：`put` / `remove` 都不写盘，`diskStore()` / `pendingOf()` 只在显式 `save()` 或 `onDisable()` 之后才有内容可读。写磁盘断言前先问「这一刻谁写过盘」，否则断言会恒真（曾出现：`put` 不写盘后，`diskStore().get(...)` 恒为空，多条断言在失败与通过之间失去区分度）。

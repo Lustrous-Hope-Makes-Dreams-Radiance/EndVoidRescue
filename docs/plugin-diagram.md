@@ -20,7 +20,7 @@ flowchart TD
         H4 --> I2
         G --> I["加入 pending 列表"]
         I --> J["mergeIfConfigured 合并同类堆叠"]
-        J --> K["PendingDropStore.put<br/>更新内存中的待返还物品"]
+        J --> K["PendingDropStore.put<br/>只更新内存中的待返还物品（不写盘）"]
     end
 
     subgraph 重生阶段["重生阶段 (PlayerRespawnEvent)"]
@@ -36,7 +36,7 @@ flowchart TD
     end
 ```
 
-插件关闭时通过 `onDisable` 调用 `store.save`，将内存记录写入 `pending-drops.yml`；启动时读取文件。
+**写盘时机**：死亡、重生阶段只更新内存（`put` / `remove` 都不写盘）；插件关闭时通过 `onDisable` 调用 `store.save`，把内存快照一次性写入 `pending-drops.yml`，启动时读取文件。因此玩家死亡后离线、服务器异常终止（`onDisable` 未执行）时，未落盘的记录会丢失，详见 README「持久化」与 docs/testing.md「已知限制」。
 
 ## 潜影盒处理原理图
 
@@ -75,6 +75,8 @@ flowchart TD
 - 黑名单物品从收纳袋内容中移除，带经验修补的物品执行砂轮式祛魔。
 - 嵌套收纳袋递归执行相同规则，最多处理 15 层。
 - 潜影盒内容中出现收纳袋时，先递归净化收纳袋，再将整个收纳袋加入待返还列表。
+
+> 注：上方「潜影盒处理原理图」中的 `extractShulkerContents` / `hasContents` 是历史名称；当前实现为 `processItem` / `processShulkerContents`（判定用 `Tag.SHULKER_BOXES`）。
 
 ## 潜影盒物理效果流程图
 
