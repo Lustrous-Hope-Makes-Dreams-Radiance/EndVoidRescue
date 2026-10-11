@@ -4,7 +4,6 @@
 flowchart TD
     subgraph 死亡阶段["死亡阶段 (PlayerDeathEvent)"]
         A["玩家在末地虚空死亡"] --> B{"世界==THE_END<br/>且死因==VOID?"}
-        B -- 否 --> Z["不做处理"]
         B -- 是 --> C["keepInventory=true<br/>getDrops().clear()"]
         C --> D["逐槽位处理背包 processItem<br/>返回值写回原槽位"]
         D --> E{"黑名单物品?"}
