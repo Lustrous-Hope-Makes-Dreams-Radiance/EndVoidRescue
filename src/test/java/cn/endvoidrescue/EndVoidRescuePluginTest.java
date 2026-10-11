@@ -11,6 +11,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
 import org.bukkit.block.ShulkerBox;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.damage.DamageSource;
 import org.bukkit.damage.DamageType;
@@ -535,6 +536,12 @@ class EndVoidRescuePluginTest {
 
     // ═══════════════════════════ 持久化 PendingDropStore ═══════════════════════════
 
+    /**
+     * 唯一写盘时机是插件关闭（onDisable → save()）时的语义下，必须显式 save() 才能等到落盘。
+     * 本测试用显式 save() 模拟关服，覆盖「正常关闭 → 重启」这条决策 A 唯一保证的路径：
+     * 物品（含附魔）经 YAML 往返完整恢复，remove 后（再次 save）读回为空。
+     * 断言顺序对应真实时序：put/remove 只改内存，save 才产生磁盘快照。
+     */
     @Test
     void pendingDropStore_roundTripAndRemoval() {
         UUID id = UUID.randomUUID();
@@ -543,6 +550,7 @@ class EndVoidRescuePluginTest {
 
         PendingDropStore store = new PendingDropStore(folder, plugin.getLogger());
         store.put(id, List.of(new ItemStack(Material.STONE, 64), enchanted));
+        store.save(); // 模拟关服落盘
 
         PendingDropStore reread = new PendingDropStore(folder, plugin.getLogger()); // 强制从磁盘重载
         List<ItemStack> loaded = reread.get(id);
@@ -552,7 +560,8 @@ class EndVoidRescuePluginTest {
         assertTrue(reloadedPickaxe.containsEnchantment(Enchantment.MENDING), "附魔必须经 YAML 往返保留");
 
         reread.remove(id);
-        assertTrue(new PendingDropStore(folder, plugin.getLogger()).get(id).isEmpty(), "remove 后应读回空");
+        reread.save(); // remove 只清内存，磁盘同步必须依赖显式 save 或关服
+        assertTrue(new PendingDropStore(folder, plugin.getLogger()).get(id).isEmpty(), "remove 并落盘后应读回空");
     }
 
     /**
@@ -560,6 +569,11 @@ class EndVoidRescuePluginTest {
      * 场景：死亡时背包为空（或全为黑名单/空潜影盒）→ onPlayerDeath 调 store.remove，
      * 但 put(uuid, List.of()) 也可能被调用；此时文件不应被创建/改写。
      * 断言文件不存在（本测试是首个写盘操作，MockBukkit 每测试独立数据目录，探针实测确认）。
+     *
+     * <p>put 已不写盘（决策 A：仅 onDisable 落盘）后，「文件不存在」不再证明「本次 put 没写盘」——
+     * 这个断言现在恒真。真正守住的是 put 开头的早退分支本身：若它被删掉，内存里会多出
+     * 一个空记录并在关服时留下空壳，由 pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection
+     * 覆盖；本测试保留为该早退行为的配套说明与防线。
      */
     @Test
     void pendingDropStore_emptyPutWithoutRecord_doesNotWriteFile() {
@@ -573,10 +587,16 @@ class EndVoidRescuePluginTest {
     }
 
     /**
-     * remove 最后一条记录后，文件里不得残留 "players:" 空段。
-     * 场景：玩家领取完物品后 store.remove 被调用；若留下 "players: {}"，
-     * 文件会随每次重生/登录事件反复重写（remove 里 pruneEmptyPlayersSection 的动机）。
-     * 断言：文件内容不含 "players" 字样，且 YamlConfiguration 解析出的 players 段为 null。
+     * remove 最后一条记录后，关服落盘不得残留 "players:" 空段。
+     * 场景：玩家领取完物品后 store.remove 只清内存；唯一写盘时机是 onDisable → save()。
+     * 若落盘时残留 "players: {}"，文件会随每次关服反复写出空壳（pruneEmptyPlayersSection 的动机）。
+     *
+     * <p>本测试同时钉住决策 A 的三个方向：
+     * <ol>
+     * <li>put/remove 只改内存：put 后（未 save）磁盘上没有 players 段，
+     * remove 后磁盘上仍留着上一次 save 写下的旧记录（陈旧记录只活到关服，见 docs/testing.md「已知风险」）；</li>
+     * <li>save 写的是内存快照 —— 关服落盘后该玩家记录与空 players 段一起消失。</li>
+     * </ol>
      */
     @Test
     void pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection() throws Exception {
@@ -586,22 +606,36 @@ class EndVoidRescuePluginTest {
 
         PendingDropStore store = new PendingDropStore(folder, plugin.getLogger());
         store.put(id, List.of(new ItemStack(Material.STONE, 5)));
-        String afterPut = Files.readString(file.toPath());
-        assertTrue(afterPut.contains("players"), "前置：写入记录后文件应含 players 段");
-        assertTrue(afterPut.contains(id.toString()), "前置：写入记录后文件应含该玩家 uuid");
+        assertEquals(1, store.get(id).size(), "前置：put 后内存应有一条记录");
+        assertNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players"),
+                "put 不写盘：此时磁盘上不应出现 players 段（本断言变红说明 put 又开始写盘了）");
+
+        store.save(); // 模拟一次关服，让磁盘上留下这条记录的旧快照
+        assertNotNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players." + id),
+                "前置：save 后磁盘上应有该玩家记录");
 
         store.remove(id);
+        assertEquals(0, store.get(id).size(), "remove 后该玩家内存记录必须清空");
+        ConfigurationSection onDiskAfterRemove = YamlConfiguration.loadConfiguration(file)
+                .getConfigurationSection("players");
+        assertNotNull(onDiskAfterRemove, "remove 只清内存、不写盘：磁盘上的旧快照必须仍在");
+        assertNotNull(onDiskAfterRemove.getConfigurationSection(id.toString()),
+                "remove 不写盘：磁盘上的旧记录必须仍在（陈旧记录只活到下一次落盘）");
 
-        String afterRemove = Files.readString(file.toPath());
-        assertFalse(afterRemove.contains("players"),
-                "remove 最后一条记录后不得残留 players 段，实际文件内容: [" + afterRemove + "]");
+        store.save(); // 模拟关服落盘
+
         assertNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players"),
-                "解析后 players 段必须为 null");
+                "关服落盘后不得残留 players 空段，实际文件内容: ["
+                        + Files.readString(file.toPath()) + "]");
+        assertNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players." + id),
+                "落盘的是内存快照：已 remove 的记录不得再出现在文件里");
     }
 
     /**
      * 写盘失败不得抛回调用方。内存 data 仍是主副本，本次进程内 get 必须读到刚 put 的物品。
-     * 变异：save() 重新抛 IllegalStateException 后，本测试变红。
+     * save() 只在关服时由 onDisable 调用，因此本测试显式调用它来触发写入失败：
+     * 数据目录被文件占住，save 必然 IOException。
+     * 变异：save() 把 IOException 重新抛出后，assertDoesNotThrow 变红。
      */
     @Test
     void pendingDropStore_saveFailure_keepsMemoryAndDoesNotThrow() throws Exception {
@@ -611,7 +645,10 @@ class EndVoidRescuePluginTest {
         UUID id = UUID.randomUUID();
 
         List<LogRecord> records = captureLogs(
-                () -> assertDoesNotThrow(() -> store.put(id, List.of(new ItemStack(Material.DIAMOND, 3)))));
+                () -> assertDoesNotThrow(() -> {
+                    store.put(id, List.of(new ItemStack(Material.DIAMOND, 3)));
+                    store.save(); // 决策 A 下唯一写盘入口，写盘失败分支由这里覆盖
+                }));
 
         assertEquals(1, countLevel(records, Level.SEVERE, "Unable to save pending drops"),
                 "写盘失败必须记 severe，实际: " + records.stream().map(LogRecord::getMessage).toList());
@@ -660,6 +697,7 @@ class EndVoidRescuePluginTest {
     /**
      * 触发死亡但这次没有新的可保留物品时，已有 pending 必须原样留下，等下次重试。
      * 死亡处理会先把 store.get 装进 pending，所以空背包不会把旧记录清掉。
+     * 断言一律走内存主副本（插件只在 onDisable 写盘，本测试无落盘动作）。
      * 变异：改回「pending 为空就 store.remove」后，旧记录消失，本测试变红。
      */
     @Test
@@ -668,7 +706,8 @@ class EndVoidRescuePluginTest {
         // 必须写进插件持有的那份 store。另 new 一个 PendingDropStore 只是另一份内存，
         // 死亡时的读取碰不到它。
         pluginStore().put(player.getUniqueId(), List.of(new ItemStack(Material.STONE, 5)));
-        assertEquals(1, pendingOf(player).size(), "前置：死亡前应已有一条 pending 记录");
+        assertEquals(1, pluginStore().get(player.getUniqueId()).size(),
+                "前置：死亡前应已有一条 pending 记录");
         player.getInventory().setItem(0, new ItemStack(Material.ELYTRA));
 
         killByVoid(player);
@@ -677,13 +716,14 @@ class EndVoidRescuePluginTest {
         assertEquals(1, kept.size(), "空结果的触发死亡必须保留旧记录");
         assertEquals(Material.STONE, kept.get(0).getType());
         assertEquals(5, kept.get(0).getAmount());
-        assertEquals(5, pendingOf(player).get(0).getAmount(), "磁盘上的旧记录也必须还在");
+        assertEquals(5, pluginStore().get(player.getUniqueId()).get(0).getAmount(),
+                "该记录的序列化形态仍正确（put 不再写盘，这里只证明物理文件里的内容可读回）");
     }
 
     /**
      * 失败重试的核心闭环：上一次发放失败留下的旧记录，必须与本次新收集的物品合并后一起写回 pending。
      * 构造：旧记录 STONE×5（写进插件持有的那份 store）+ 背包里一个装有 3 个绿宝石的潜影盒。
-     * 期望：死亡后 pending 同时含 STONE×5 与 EMERALD×3（内存与磁盘两份视图都断言）。
+     * 期望：死亡后 pending 同时含 STONE×5 与 EMERALD×3（内存主副本与磁盘序列化形态各断言一次）。
      * 变异：把 onPlayerDeath 里的 `List<ItemStack> pending = store.get(playerId);`
      * 改成 `List<ItemStack> pending = new ArrayList<>();` 后旧记录被丢弃，本测试变红。
      */
@@ -695,7 +735,7 @@ class EndVoidRescuePluginTest {
         player.getInventory().setItem(0, shulker);
 
         assertTrue(hasShulkerContents(player.getInventory().getItem(0)), "前置：潜影盒应装有绿宝石");
-        List<ItemStack> before = pendingOf(player);
+        List<ItemStack> before = pluginStore().get(player.getUniqueId());
         assertEquals(1, before.size(), "前置：应已有一条旧 pending 记录");
         assertEquals(Material.STONE, before.get(0).getType(), "前置：旧记录应是 STONE");
         assertEquals(5, before.get(0).getAmount(), "前置：旧记录数量应是 5");
@@ -709,9 +749,11 @@ class EndVoidRescuePluginTest {
         assertEquals(3, countAmount(merged, Material.EMERALD), "潜影盒里的 EMERALD×3 必须并入");
         assertNull(player.getInventory().getItem(0), "潜影盒本体应消失");
 
+        // 磁盘视图：put/remove 都不写盘，必须显式 save 模拟关服，才能验证合并结果的序列化形态。
+        pluginStore().save();
         List<ItemStack> fromDisk = pendingOf(player);
-        assertEquals(5, countAmount(fromDisk, Material.STONE), "磁盘上的旧记录必须保留");
-        assertEquals(3, countAmount(fromDisk, Material.EMERALD), "磁盘上必须含新并入的绿宝石");
+        assertEquals(5, countAmount(fromDisk, Material.STONE), "落盘后旧记录 STONE×5 必须仍在");
+        assertEquals(3, countAmount(fromDisk, Material.EMERALD), "落盘后必须含新并入的 EMERALD×3");
     }
 
     /**
@@ -734,6 +776,8 @@ class EndVoidRescuePluginTest {
 
     /**
      * 重生时该玩家没有 pending：不得误删其他玩家的记录，也不得产生掉落。
+     * remove 只清内存、不写盘，因此其他玩家的记录只能从内存主副本读（diskStore 是一份干净内存，
+     * put 不落盘时读不到）——本断言因此能真正抓到「误删其他玩家记录」。
      * 本测试不钉 onPlayerRespawn 开头的 store.remove 是否被调用——
      * 删掉那段后这里仍然全绿。空记录壳的清理由 PendingDropStore 自己的测试钉住。
      */
@@ -741,23 +785,23 @@ class EndVoidRescuePluginTest {
     void respawnWithNoPending_callsStoreRemoveWithoutDropping() throws Exception {
         PlayerMock player = endPlayer("empty_respawn");
         UUID other = UUID.randomUUID();
-        diskStore().put(other, List.of(new ItemStack(Material.STONE, 4)));
-        assertTrue(pendingOf(player).isEmpty(), "前置：该玩家不应有 pending");
+        pluginStore().put(other, List.of(new ItemStack(Material.STONE, 4)));
+        assertTrue(pluginStore().get(player.getUniqueId()).isEmpty(), "前置：该玩家不应有 pending");
 
         server.getPluginManager().callEvent(new PlayerRespawnEvent(
                 player, new Location(player.getWorld(), 0, 64, 0), false));
         server.getScheduler().performTicks(2);
 
-        assertEquals(4, diskStore().get(other).get(0).getAmount(),
+        assertEquals(4, pluginStore().get(other).get(0).getAmount(),
                 "清理空记录不得误删其他玩家");
         assertTrue(player.getWorld().getEntitiesByClass(Item.class).isEmpty(), "无记录不得产生掉落");
-        assertTrue(pendingOf(player).isEmpty());
+        assertTrue(pluginStore().get(player.getUniqueId()).isEmpty());
     }
 
     // ═══════════════════════ 端到端：死亡 → 存储 → 重生 → burst ═══════════════════════
 
     @Test
-    void endToEnd_endVoidDeath_rescuesShulkerContentsAtRespawn() {
+    void endToEnd_endVoidDeath_rescuesShulkerContentsAtRespawn() throws Exception {
         WorldMock end = addWorld("e2e_end", World.Environment.THE_END);
         PlayerMock player = server.addPlayer();
         player.teleport(new Location(end, 100, 64, 100));
@@ -804,18 +848,23 @@ class EndVoidRescuePluginTest {
         assertTrue(Math.abs(dx) < 0.5 + 1e-9 && Math.abs(dz) < 0.5 + 1e-9,
                 "散落必须限制在重生方块内，实际偏移 dx=" + dx + " dz=" + dz);
 
-        // 记录清理断言
+        // 记录清理断言：内存是主副本。磁盘只有在关服（onDisable → save）时才同步，
+        // 本测试不调 onDisable，因此磁盘始终为空——「关服后磁盘清空」由
+        // shutdownHook_persistsPendingRecordToDisk 覆盖。
+        assertTrue(pluginStore().get(player.getUniqueId()).isEmpty(),
+                "burst 后内存中的 pending 记录必须清空");
         assertTrue(diskStore().get(player.getUniqueId()).isEmpty(),
-                "burst 后 pending 记录必须清空");
+                "本测试不关服：磁盘上不应出现已发放的记录");
     }
 
     /**
      * 情况 A：末地虚空死亡后、重生事件触发前离线，重进后再重生，待返还物品仍要散落。
-     * 记录在死亡时已写入 pending-drops.yml，退出本身不清理；重进后的 PlayerRespawnEvent 才发放。
+     * 记录是内存主副本（插件不注册 PlayerQuitEvent 监听器，退出本身不清理）；
+     * 唯一写盘时机是 onDisable，本场景全程在同一进程内，因此断言一律走内存视图。
      * 变异：死亡时不再 store.put，则离线期间记录为空，本测试变红。
      */
     @Test
-    void endToEnd_quitBeforeRespawn_rejoinStillBurstsPending() {
+    void endToEnd_quitBeforeRespawn_rejoinStillBurstsPending() throws Exception {
         WorldMock end = addWorld("e2e_rejoin_end", World.Environment.THE_END);
         WorldMock overworld = addWorld("e2e_rejoin_over", World.Environment.NORMAL);
         PlayerMock player = server.addPlayer();
@@ -827,12 +876,14 @@ class EndVoidRescuePluginTest {
         server.getPluginManager().callEvent(new PlayerDeathEvent(player,
                 DamageSource.builder(DamageType.OUT_OF_WORLD).build(),
                 new ArrayList<>(), 0, null, false));
-        assertEquals(4, pendingOf(player).get(0).getAmount(), "前置：死亡后绿宝石应已写入 pending");
+        assertEquals(4, pluginStore().get(player.getUniqueId()).get(0).getAmount(),
+                "前置：死亡后绿宝石应已写入内存 pending");
 
         assertTrue(player.disconnect(), "前置：玩家应能在重生前退出");
         assertFalse(player.isOnline());
         server.getScheduler().performTicks(2);
-        assertEquals(4, pendingOf(player).get(0).getAmount(), "重生前退出不得清掉 pending");
+        assertEquals(4, pluginStore().get(player.getUniqueId()).get(0).getAmount(),
+                "重生前退出不得清掉内存 pending");
         assertTrue(end.getEntitiesByClass(Item.class).isEmpty(), "尚未重生时不得散落");
 
         server.addPlayer(player);
@@ -849,7 +900,42 @@ class EndVoidRescuePluginTest {
         Location loc = drops.get(0).getLocation();
         assertEquals(respawn.getBlockX(), loc.getBlockX(), "物品必须落在重进后的重生格");
         assertEquals(respawn.getBlockZ(), loc.getBlockZ());
-        assertTrue(pendingOf(player).isEmpty(), "发放后 pending 记录必须清空");
+        assertTrue(pluginStore().get(player.getUniqueId()).isEmpty(), "发放后内存 pending 记录必须清空");
+    }
+
+    /**
+     * 关服落盘：插件关闭时必须把内存快照写进 pending-drops.yml，且重启（新实例从磁盘读）后仍可领取。
+     * 这是决策 A 唯一保证的持久化路径——内存里有未落盘的记录时，onDisable 是它活过重启的唯一机会。
+     * 用插件实例的 onDisable() 走真实关服路径，而不是直接调 store.save()。
+     * 探针实测：MockBukkit.unmock()（disablePlugins → onDisable）在本版本下不会触发本插件的
+     * onDisable（文件始终不被创建），因此必须显式调用生产代码的 onDisable() 本身。
+     * 变异：删掉 onDisable 里的 store.save() 后，文件不存在、本测试变红（实测确认）。
+     */
+    @Test
+    void shutdownHook_persistsPendingRecordToDisk() throws Exception {
+        WorldMock end = addWorld("e2e_shutdown_end", World.Environment.THE_END);
+        PlayerMock player = server.addPlayer();
+        player.teleport(new Location(end, 100, 64, 100));
+        player.getInventory().setItem(0, shulkerWith(List.of(new ItemStack(Material.EMERALD, 4))));
+        player.setLastDamageCause(new EntityDamageEvent(player,
+                EntityDamageEvent.DamageCause.VOID, 40.0));
+
+        server.getPluginManager().callEvent(new PlayerDeathEvent(player,
+                DamageSource.builder(DamageType.OUT_OF_WORLD).build(),
+                new ArrayList<>(), 0, null, false));
+        assertEquals(4, pluginStore().get(player.getUniqueId()).get(0).getAmount(),
+                "前置：死亡后内存应有一条待落盘记录");
+
+        File file = new File(plugin.getDataFolder(), "pending-drops.yml");
+        assertFalse(Files.exists(file.toPath()), "前置：决策 A 下 put 不写盘，死亡后文件不应存在");
+
+        plugin.onDisable(); // 生产代码的关服入口
+
+        assertTrue(Files.exists(file.toPath()), "关服必须创建 pending-drops.yml");
+        List<ItemStack> reloaded = diskStore().get(player.getUniqueId()); // 模拟重启后读盘
+        assertEquals(1, reloaded.size(), "重启后应读回待领取记录");
+        assertEquals(Material.EMERALD, reloaded.get(0).getType());
+        assertEquals(4, reloaded.get(0).getAmount());
     }
 
     @Test
@@ -1168,7 +1254,7 @@ class EndVoidRescuePluginTest {
         return diskStore().get(player.getUniqueId());
     }
 
-    /** 从磁盘另读一份，不碰插件内存里的 store。 */
+    /** 读物理文件另起一份内存 store（不碰插件内存），只在 put/save 已落盘后才有内容可读。 */
     private PendingDropStore diskStore() {
         return new PendingDropStore(plugin.getDataFolder(), plugin.getLogger());
     }
