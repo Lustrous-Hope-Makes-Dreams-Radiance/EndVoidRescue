@@ -16,11 +16,13 @@ final class PendingDropStore {
     private final File file;
     private final YamlConfiguration data;
     private final Logger logger;
+    private final boolean saveImmediately;
 
-    PendingDropStore(File dataFolder, Logger logger) {
+    PendingDropStore(File dataFolder, Logger logger, boolean saveImmediately) {
         this.file = new File(dataFolder, "pending-drops.yml");
         this.data = YamlConfiguration.loadConfiguration(file);
         this.logger = logger;
+        this.saveImmediately = saveImmediately;
     }
 
     synchronized void put(UUID playerId, List<ItemStack> items) {
@@ -36,6 +38,9 @@ final class PendingDropStore {
         if (items.isEmpty()) {
             // 空列表不留下空记录，否则会被序列化成 "players.<uuid>: {}"。
             pruneEmptyPlayersSection();
+        }
+        if (saveImmediately) {
+            save();
         }
     }
 
@@ -60,11 +65,16 @@ final class PendingDropStore {
         String path = "players." + playerId;
         if (!data.contains(path)) {
             // 没有记录可清理（例如死亡时背包为空），只更新内存中的空壳。
-            pruneEmptyPlayersSection();
+            if (saveImmediately && pruneEmptyPlayersSection()) {
+                save();
+            }
             return;
         }
         data.set(path, null);
         pruneEmptyPlayersSection();
+        if (saveImmediately) {
+            save();
+        }
     }
 
     /** 所有玩家记录都清空后，把空的 players 段一并删除，避免文件里留下 "players: {}"。返回是否发生了清理。 */
