@@ -72,7 +72,7 @@ burst:
 
 ## 持久化
 
-待返还物品写入 `plugins/EndVoidRescue/pending-drops.yml`。
+死亡和重生时只更新内存中的待返还物品；插件关闭时写入 `plugins/EndVoidRescue/pending-drops.yml`，启动时读取。服务器崩溃或被强制终止时，尚未写盘的变更不会保存。
 
 ## 文档
 

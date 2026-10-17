@@ -43,10 +43,16 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        store = new PendingDropStore(getDataFolder(), getLogger());
+        String saveMode = getConfig().getString("pending-drops.save-mode", "shutdown");
+        store = new PendingDropStore(getDataFolder(), getLogger(), "immediate".equalsIgnoreCase(saveMode));
         reloadSettings();
         getServer().getPluginManager().registerEvents(this, this);
         getLogger().info("EndVoidRescue enabled");
+    }
+
+    @Override
+    public void onDisable() {
+        store.save();
     }
 
     private void reloadSettings() {

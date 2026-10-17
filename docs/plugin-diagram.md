@@ -21,7 +21,7 @@ flowchart TD
         H4 --> I2
         G --> I["加入 pending 列表"]
         I --> J["mergeIfConfigured 合并同类堆叠"]
-        J --> K["PendingDropStore.put<br/>写入 pending-drops.yml"]
+        J --> K["PendingDropStore.put<br/>更新内存中的待返还物品"]
     end
 
     subgraph 重生阶段["重生阶段 (PlayerRespawnEvent)"]
@@ -36,6 +36,8 @@ flowchart TD
         R -- 是 --> T["记 severe 后 return<br/>保留记录，下次死亡合并重试"]
     end
 ```
+
+插件关闭时通过 `onDisable` 调用 `store.save`，将内存记录写入 `pending-drops.yml`；启动时读取文件。
 
 ## 潜影盒处理原理图
 
