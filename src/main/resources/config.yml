@@ -12,8 +12,6 @@ blacklist:
   - END_CRYSTAL
 remove-non-curse-enchant: true
 burst:
-  # 重生点所在格内的水平散落程度，单位：格。有效范围 [0, 0.5]。
-  # 大于 0.5 会被截断为 0.5，不会跨到相邻方块。
   radius: 0.5
   merge-similar: true
   pickup-delay-ticks: 10
