@@ -6,6 +6,7 @@ import org.bukkit.Material;
 import org.bukkit.Tag;
 import org.bukkit.World;
 import org.bukkit.block.ShulkerBox;
+import org.bukkit.configuration.Configuration;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
@@ -43,10 +44,37 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        store = new PendingDropStore(getDataFolder(), getLogger());
+        ensureConfigDefaults();
+        String saveMode = getConfig().getString("pending-drops.save-mode", "immediate");
+        store = new PendingDropStore(getDataFolder(), getLogger(), "immediate".equalsIgnoreCase(saveMode));
         reloadSettings();
         getServer().getPluginManager().registerEvents(this, this);
         getLogger().info("EndVoidRescue enabled");
+    }
+
+    private void ensureConfigDefaults() {
+        Configuration config = getConfig();
+        Configuration defaults = config.getDefaults();
+        if (defaults == null) {
+            return;
+        }
+        List<String> addedKeys = new ArrayList<>();
+        for (String path : defaults.getKeys(true)) {
+            if (defaults.isConfigurationSection(path) || config.contains(path, true)) {
+                continue;
+            }
+            config.set(path, defaults.get(path));
+            addedKeys.add(path);
+        }
+        if (!addedKeys.isEmpty()) {
+            saveConfig();
+            getLogger().warning("Added missing config keys: " + String.join(", ", addedKeys));
+        }
+    }
+
+    @Override
+    public void onDisable() {
+        store.save();
     }
 
     private void reloadSettings() {

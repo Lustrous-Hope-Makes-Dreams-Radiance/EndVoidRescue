@@ -21,7 +21,7 @@ flowchart TD
         H4 --> I2
         G --> I["加入 pending 列表"]
         I --> J["mergeIfConfigured 合并同类堆叠"]
-        J --> K["PendingDropStore.put<br/>写入 pending-drops.yml"]
+        J --> K["PendingDropStore.put<br/>更新内存中的待返还物品"]
     end
 
     subgraph 重生阶段["重生阶段 (PlayerRespawnEvent)"]
@@ -36,6 +36,8 @@ flowchart TD
         R -- 是 --> T["记 severe 后 return<br/>保留记录，下次死亡合并重试"]
     end
 ```
+
+`pending-drops.save-mode` 为 `immediate` 时，`store.put/remove` 在变更后立即写入 `pending-drops.yml`；为 `shutdown` 时仅由插件关闭时的 `onDisable -> store.save` 写入。启动时读取文件，缺少的配置键会补入默认值。
 
 ## 潜影盒处理原理图
 
@@ -65,7 +67,7 @@ flowchart TD
     I --> E
     Q --> E
     E --> R["盒本身丢弃, 不保留"]
-    R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 写入 yml"]
+    R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 更新内存<br/>按 save-mode 立即写盘或关服写盘"]
 ```
 
 ## 收纳袋处理说明
