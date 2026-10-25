@@ -1,8 +1,8 @@
 trigger-world: THE_END
 trigger-cause: VOID
 pending-drops:
-  # 保存时机：shutdown 仅在插件关闭时保存，immediate 在死亡/重生变更后立即保存。
-  save-mode: shutdown
+  # 保存时机：immediate 在死亡/重生变更后立即保存，shutdown 仅在插件关闭时保存。
+  save-mode: immediate
 blacklist:
   - ELYTRA
   - SHULKER_SHELL

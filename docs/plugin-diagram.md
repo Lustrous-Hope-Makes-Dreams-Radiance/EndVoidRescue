@@ -37,7 +37,7 @@ flowchart TD
     end
 ```
 
-插件关闭时通过 `onDisable` 调用 `store.save`，将内存记录写入 `pending-drops.yml`；启动时读取文件。
+`pending-drops.save-mode` 为 `immediate` 时，`store.put/remove` 在变更后立即写入 `pending-drops.yml`；为 `shutdown` 时仅由插件关闭时的 `onDisable -> store.save` 写入。启动时读取文件，缺少的配置键会补入默认值。
 
 ## 潜影盒处理原理图
 
@@ -67,7 +67,7 @@ flowchart TD
     I --> E
     Q --> E
     E --> R["盒本身丢弃, 不保留"]
-    R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 写入 yml"]
+    R --> S["所有槽位处理完毕后<br/>统一 mergeIfConfigured 合并 -> store.put 更新内存<br/>按 save-mode 立即写盘或关服写盘"]
 ```
 
 ## 收纳袋处理说明
