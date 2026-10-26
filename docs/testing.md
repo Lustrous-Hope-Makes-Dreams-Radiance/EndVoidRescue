@@ -10,7 +10,7 @@
 - 插件通过 `MockBukkit.load(EndVoidRescuePlugin.class)` 以**真实插件实例**加载：`onEnable` 正常执行、`config.yml` 正常读取、监听器正常注册。
 - 核心私有方法 `processItem` 通过反射调用，避免为了测试而扩大生产 API。
 - 运行：`mvn test`。
-- 最后一次核对（HEAD `c1f07b6`，`mvn -o test`）：**Tests run: 41, Failures: 0, Errors: 0, Skipped: 4**。41 条的分布见「测试覆盖矩阵」，4 条 skipped 的原因见「附魔书退化路径」与「真实服务器验收清单」。
+- 最后一次核对（`mvn -o test`）：**Tests run: 49, Failures: 0, Errors: 0, Skipped: 4**。49 条的分布见「测试覆盖矩阵」，4 条 skipped 的原因见「附魔书退化路径」与「真实服务器验收清单」。
 
 ### 标注约定
 
@@ -32,6 +32,9 @@
 | `ItemMeta` setter 与数据组件 API（`ItemStack#setData`/`getData`）是**两套互不可见的存储**〔探针实测，本次未复跑〕 | 用 meta setter 设的名称/lore 读 `getData(...)` 得到 `null`，反之亦然 | 显示属性相关断言统一走 `getItemMeta()` 路线（与生产代码读取路径一致）；不要混用两套 API |
 | **`ItemStack#copyDataFrom` 未实现**，抛 `UnimplementedOperationException`（继承 `org.opentest4j.TestAbortedException`） | 生产代码一旦调用它，相关测试被记为 **skipped 而非 failed**——`mvn test` 仍显示 BUILD SUCCESS，极易误读为通过。**当前 HEAD 正处在这一状态：4 条测试被静默跳过** | 见「附魔书退化路径」。**维护规则第 6 条：看测试结果必须核对 Skipped 计数，不能只看 Failures** |
 | **`MockBukkit.unmock()` 不触发本插件的 `onDisable`**（`disablePlugins` 链路在本版本下不会调用它，`pending-drops.yml` 始终不被创建） | 用它验证「关服落盘」会得到「文件不存在」，断言恒真 | `shutdownHook_persistsPendingRecordToDisk` 显式调用生产代码的 `plugin.onDisable()`；**不要改回 `unmock()`** |
+| **`MockBukkit.load` 读的是 jar 内真实 `config.yml`**（`save-mode: immediate`），而 `loadWithConfig` 注入的配置 `getDefaults() == null` | 若测试跟随 `config.yml` 默认值，所有「put/remove 不写盘」的磁盘断言会退化成恒真；`ensureConfigDefaults` 在注入配置下直接早退 | `setUp` 用 `loadWithConfig(..., testConfig("shutdown"))` 把默认测试钉在 `shutdown` 模式；`bundledConfig_loadsWithExpectedDefaults` 是唯一读真实 `config.yml` 的测试 |
+| **同一 session 内重复 `load` 会叠加监听器**（旧实例仍挂在 `HandlerList` 上，且 `PluginManagerMock` 没有 `getListeners(Class)` 可查） | 旧监听器先消费死亡事件、把潜影盒从背包摘掉，新实例只看到空背包，模式断言全部失真 | 换模式必须走 `reloadPluginWith()`：先 `unmock()` 再 `mock()`，得到全新 session 与干净数据目录 |
+| **`onEnable` 抛异常后 `unmock()` 无法完全清理**（后续 `mock()` 抛 `Already mocking`） | 一个真实失败会被放大成整套 49 个错误，掩盖根因 | 已知限制，未规避；排查时先看**第一条**错误（通常是 `setUp` 里的 NPE），不要被后续 `Already mocking` 误导 |
 | `REPAIR_COST` 在**附魔书**上的 `setData`/`getData` 往返**正常**（与收纳袋丢组件的怪癖不同） | 可以正常写出「前置：repair_cost=39」的断言 | `degradedBook_resetsRepairCost` 的前置断言实测能读回 39——本次 surefire 记录显示该测试是在 `processItem` **之后**才中止的，前置断言确实通过 |
 
 发放在 `PlayerRespawnEvent` 里同步执行，生产代码不注册任何调度任务（不调用 `runTask` 一类 API），「调度任务异常从 `performTicks` 传播」这条怪癖**暂无测试使用**（原先的 `assertDoesNotThrow(() -> performTicks(...))` 断言已随之删除）。测试里残留的 `performTicks(2)` 调用是**空跑**——生产代码不注册调度器，这些调用不等待任何任务，保留不影响结论。
@@ -148,7 +151,7 @@ org.mockbukkit.mockbukkit.exception.UnimplementedOperationException: Not impleme
 
 ## 测试覆盖矩阵
 
-共 **41** 条（`@Test` 注解计数），本次执行为 37 条通过、**4 条 skipped**（下表标 ⏭）。计数以 surefire 的 `Tests run / Failures / Errors / Skipped` 为准，不能只看 BUILD 结果。
+共 **49** 条（`@Test` 注解计数），本次执行为 45 条通过、**4 条 skipped**（下表标 ⏭）。计数以 surefire 的 `Tests run / Failures / Errors / Skipped` 为准，不能只看 BUILD 结果。
 
 ### 1. 深度边界（4 条，最关键，对应历史回归）
 
@@ -209,13 +212,27 @@ org.mockbukkit.mockbukkit.exception.UnimplementedOperationException: Not impleme
 
 > 退化路径的三条断言在修好 `copyDataFrom` 的 MockBukkit 支持之前无法执行，其行为只能按上文「真实服务器验收清单」在真实服务器确认。
 
-### 5. 持久化与合并（5 条）
+### 5. 持久化与合并（12 条）
 
-> **写盘时机（决策 A）**：`put` 与 `remove` **都不写盘**，只改内存（内存是主副本）；唯一写盘时机是插件关闭时的 `onDisable → PendingDropStore.save()`。因此断言分两类：**内存视图**（`pluginStore()`，进程内真相）与**磁盘视图**（`diskStore()` / `pendingOf()`，只在显式 `save()` 或 `onDisable` 之后才可信）。断言磁盘前必须确认该路径已经落过盘，否则断言恒真。
+> **两种写盘时机（`pending-drops.save-mode`）**：
+> - `shutdown`（保守）：`put` 与 `remove` **都不写盘**，只改内存（内存是主副本）；唯一写盘时机是插件关闭时的 `onDisable → PendingDropStore.save()`。
+> - `immediate`（**config.yml 默认值**）：`put` 与 `remove` 各自立即 `save()`，无需关服即可跨进程持久化。
+>
+> 因此断言分两类：**内存视图**（`pluginStore()`，进程内真相）与**磁盘视图**（`diskStore()` / `pendingOf()`，只在 `immediate` 模式、显式 `save()` 或 `onDisable` 之后才可信）。断言磁盘前必须确认该路径已经落过盘，否则断言恒真。
+>
+> **测试默认钉在 `shutdown` 模式**：`setUp` 用 `MockBukkit.loadWithConfig(..., testConfig("shutdown"))` 注入配置，而不是读 `config.yml`。原因：整套磁盘断言都按「put/remove 只改内存」编写，若跟随 `config.yml` 的 `immediate` 默认值，这些断言会大面积退化成恒真。`immediate` 由 `pendingDropStore_immediateMode_*`、`saveModeImmediate_*` 与 `bundledConfig_loadsWithExpectedDefaults` 覆盖。
 
-- **YAML 往返**（`pendingDropStore_roundTripAndRemoval`）：`put` → `save()`（模拟关服）→ 新实例从磁盘读回物品（含附魔）；`remove` → `save()` → 读回为空。覆盖「正常关闭 → 重启」这条决策 A 唯一保证的路径。
-- **空 put 且无记录不写盘**（`pendingDropStore_emptyPutWithoutRecord_doesNotWriteFile`）：文件不得被创建——防死亡时背包为空却反复重写文件。注意：`put` 不写盘后该断言恒真，真正守住的是 `put` 开头的早退分支（空列表且玩家无记录时直接 return），删掉该分支会由下一条的空段断言抓到。
-- **remove 最后一条记录不留空段**（`pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection`）：钉住决策 A 的三个方向——(1) `put` 不写盘：put 后解析磁盘的 `players` 段为 `null`；(2) `remove` 不写盘：显式 `save()` 留下磁盘快照后，`remove` 之后磁盘上那条旧记录**必须仍在**（陈旧记录只活到关服，见「已知风险」）；(3) `save` 写的是内存快照：再次 `save()` 后该记录与空 `players` 段一起消失（文件不得残留 `players:` 空段）。变异：把 `save()` 加回 `PendingDropStore.remove()` 末尾，(2) 变红。
+- **YAML 往返**（`pendingDropStore_roundTripAndRemoval`）：`put` → `save()`（模拟关服）→ 新实例从磁盘读回物品（含附魔）；`remove` → `save()` → 读回为空。覆盖「正常关闭 → 重启」这条 `shutdown` 模式唯一保证的路径。
+- **空 put 且无记录不写盘**（`pendingDropStore_emptyPutWithoutRecord_doesNotWriteFile`）：文件不得被创建——防死亡时背包为空却反复重写文件。注意：`shutdown` 模式下 `put` 不写盘后该断言恒真，真正守住的是 `put` 开头的早退分支（空列表且玩家无记录时直接 return），删掉该分支会由下一条的空段断言抓到；`immediate` 模式下同一早退分支由 `pendingDropStore_immediateMode_emptyPutWithoutRecord_stillSkipsWrite` 直接钉住（删掉早退会立刻写出空 `players` 段）。
+- **remove 最后一条记录不留空段**（`pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection`）：钉住 `shutdown` 模式的三个方向——(1) `put` 不写盘：put 后解析磁盘的 `players` 段为 `null`；(2) `remove` 不写盘：显式 `save()` 留下磁盘快照后，`remove` 之后磁盘上那条旧记录**必须仍在**（陈旧记录只活到关服，见「已知风险」）；(3) `save` 写的是内存快照：再次 `save()` 后该记录与空 `players` 段一起消失（文件不得残留 `players:` 空段）。变异：把 `save()` 加回 `PendingDropStore.remove()` 末尾，(2) 变红。
+- **immediate 模式立即落盘**（`pendingDropStore_immediateMode_writesOnPutAndRemove`）：`saveImmediately=true` 时 `put` 后磁盘立刻有记录、`remove` 后立刻消失且不留空段，全程不调 `save()`。变异：删掉 `put`/`remove` 里的 `save()` 调用后两处磁盘断言都变红（实测确认）。
+- **immediate 模式空 put 仍早退**（`pendingDropStore_immediateMode_emptyPutWithoutRecord_stillSkipsWrite`）：`saveImmediately=true` 时空 put 也不得创建文件。变异：删掉 `put` 开头的早退分支后立刻写出空 `players` 段。
+- **immediate 端到端**（`saveModeImmediate_deathPersistsWithoutShutdown`）：`save-mode: immediate` 下末地虚空死亡后**无需关服**，`pending-drops.yml` 立刻可被新实例读回。变异：把 `onEnable` 的 `save-mode` 解析改成恒 `false` 后文件不存在、本测试变红（实测确认）。
+- **shutdown 端到端**（`saveModeShutdown_deathDoesNotPersistUntilDisable`）：与上一条成对，钉住两种模式的**差异本身**——死亡后磁盘上不得出现记录，只有 `onDisable` 才落盘。
+- **save-mode 解析**（`saveMode_parsing_defaultsToImmediateAndIsCaseInsensitive`）：缺省 → `immediate`；大小写不敏感（`IMMEDIATE` 生效）；无法识别的值 → `shutdown`（保守不写盘）。变异：`equalsIgnoreCase` 改成 `equals` 后大小写用例变红（实测确认）。
+- **ensureConfigDefaults 补键**（`ensureConfigDefaults_addsMissingKeysWithoutOverwritingExisting`）：jar 内 `config.yml` 有、玩家配置缺的键必须补上并 warning，且**绝不覆盖玩家已设置的值**。变异：`contains(path, true)` 改成 `contains(path)` 后玩家自定义值被默认值覆盖、warning 断言变红（实测确认）。
+- **ensureConfigDefaults 无默认值**（`ensureConfigDefaults_withoutDefaults_isNoOp`）：`getDefaults() == null` 时必须安全返回。变异：删掉 `defaults == null` 早退后抛 NPE。
+- **jar 内 config.yml 可加载**（`bundledConfig_loadsWithExpectedDefaults`）：**唯一**读真实 `config.yml` 的测试——其余测试都注入配置，若资源过滤或 YAML 语法坏了只有这里会红。断言 `save-mode: immediate`、六项黑名单、`burst.*`、`remove-non-curse-enchant`、`trigger-*` 全部与文件一致。
 - **写盘失败不抛回调用方**（`pendingDropStore_saveFailure_keepsMemoryAndDoesNotThrow`）：数据目录被文件占住使 `save()` 必然 `IOException`，此时必须记一条 severe（含 `Unable to save pending drops`）且不抛异常，内存主副本仍可读。变异：`save()` 把 `IOException` 重新抛出后，`assertDoesNotThrow` 变红。
 - **合并**（`mergeSplitsOversizedStacks_conservingTotal`）：100 个圆石 → 64+36，总量守恒——防合并丢数量。
 
@@ -274,16 +291,23 @@ org.mockbukkit.mockbukkit.exception.UnimplementedOperationException: Not impleme
 
 发放在 `PlayerRespawnEvent` 里同步执行，没有登录补发，插件也不注册 `PlayerQuitEvent` 监听器。因此「重连后仍可领取」只覆盖情况 A：死亡之后、重生事件触发之前离线，重进并触发重生后散落——**前提是服务器进程没有结束**：这条路径完全依赖内存副本，记录此时尚未写盘。
 
-### 跨进程持久化不再保证（决策 A）
+### 跨进程持久化取决于 save-mode
 
-`put` / `remove` 只改内存，唯一写盘时机是关服 `onDisable → save()`。因此：
+`pending-drops.save-mode` 决定写盘时机：
 
-| 终止方式 | 磁盘状态 | 后果 |
+| 模式 | 写盘时机 | 跨进程保证 |
+| --- | --- | --- |
+| `immediate`（**默认**） | `put` / `remove` 各自立即 `save()` | 死亡后立刻落盘，异常终止最多丢失「最后一次写盘之后」的变更 |
+| `shutdown` | 仅 `onDisable → save()` | 只有正常关闭才落盘；异常终止会丢失自上次关服以来的全部变更 |
+
+`shutdown` 模式的取舍是「以关服时一次性写盘换取死亡/重生路径零写盘」，代价如下：
+
+| 终止方式 | `shutdown` 磁盘状态 | 后果 |
 | --- | --- | --- |
 | 正常关闭（`stop` / 重启） | 内存快照完整落盘 | 待领取记录仍在；已发放记录的陈旧副本被清掉 |
 | 异常终止（崩溃 / `kill -9` / OOM / 容器强杀 / 断电） | 停在最后一次写盘 | 自那以后的所有变更丢失，包括刚死亡产生的待领取记录；「发放失败重试」的旧记录若从未落盘也一并失效 |
 
-玩家死亡后离线、服务器在离线期间异常终止、玩家重连的场景会**永久丢失**该次待领取物品。这是决策 A 明确的取舍：以「关服时一次性写盘」换取死亡/重生路径零写盘。若将来要恢复跨进程保证，做法是把 `save()` 加回 `PendingDropStore.put`（`remove` 是否写盘是独立决定，见「已知风险」）。
+玩家死亡后离线、服务器在离线期间异常终止、玩家重连的场景在 `shutdown` 模式下会**永久丢失**该次待领取物品；`immediate` 模式下不会（死亡时已落盘）。两种模式的差异由 `saveModeImmediate_deathPersistsWithoutShutdown` 与 `saveModeShutdown_deathDoesNotPersistUntilDisable` 成对钉住。
 
 ### 世界未加载守卫
 
@@ -299,13 +323,13 @@ org.mockbukkit.mockbukkit.exception.UnimplementedOperationException: Not impleme
 
 ## 已知风险
 
-### 已发放记录在下一次落盘前仍留在文件里
+### 已发放记录在下一次落盘前仍留在文件里（仅 shutdown 模式）
 
-`remove` 不写盘，所以玩家领取（`burst` 成功）之后 `pending-drops.yml` 直到下一次关服才被改写。磁盘上的陈旧记录与内存已经不同步。
+`shutdown` 模式下 `remove` 不写盘，所以玩家领取（`burst` 成功）之后 `pending-drops.yml` 直到下一次关服才被改写。磁盘上的陈旧记录与内存已经不同步。
 
 后果：若在「发放成功」与「下一次落盘」之间服务端异常终止，重启后该记录会被读回来，玩家下次在末地死亡时**再领一份**（重复发放）。
 
-评估：窗口在正常关闭时关闭，只有异常终止才暴露；本插件对整单记录本就有同类重复风险（`burst` 中途失败会整单重发，见下一条）。若要收紧，把 `save()` 同时加回 `PendingDropStore.remove` 即可——代价是每次重生/空死亡都重写整个文件，这正是决策 A 想省掉的写盘。
+评估：窗口在正常关闭时关闭，只有异常终止才暴露；本插件对整单记录本就有同类重复风险（`burst` 中途失败会整单重发，见下一条）。`immediate` 模式下 `remove` 立即落盘，本风险不存在。若要收紧 `shutdown` 模式，把 `save()` 同时加回 `PendingDropStore.remove` 即可——代价是每次重生/空死亡都重写整个文件，这正是该模式想省掉的写盘。
 
 `pendingDropStore_removeLastRecord_leavesNoEmptyPlayersSection` 用「remove 后磁盘仍含该记录」这一条断言把本行为钉住（变异：把 `save()` 加回 `remove()` 后该断言变红）。
 

@@ -72,7 +72,11 @@ class EndVoidRescuePluginTest {
     @BeforeEach
     void setUp() throws Exception {
         server = MockBukkit.mock();
-        plugin = MockBukkit.load(EndVoidRescuePlugin.class);
+        // 默认把插件钉在 shutdown 模式：整套磁盘断言（diskStore()/pendingOf()）都按
+        // 「put/remove 只改内存、唯一写盘时机是 onDisable」的语义编写。config.yml 的默认值
+        // 已改成 immediate，若跟随它，这些断言会大面积退化成恒真（见 docs/testing.md）。
+        // immediate 模式由 saveModeImmediate_* 与 *ImmediateWritesDisk 等专用测试覆盖。
+        plugin = MockBukkit.loadWithConfig(EndVoidRescuePlugin.class, testConfig("shutdown"));
         processItemMethod = EndVoidRescuePlugin.class.getDeclaredMethod("processItem", ItemStack.class, List.class);
         processItemMethod.setAccessible(true);
         // 防御性前置：确认 config.yml 真的被加载、黑名单真的非空。
@@ -93,7 +97,13 @@ class EndVoidRescuePluginTest {
 
     @AfterEach
     void tearDown() {
-        MockBukkit.unmock();
+        // setUp 失败时也必须解绑，否则下一个测试的 MockBukkit.mock() 会抛 "Already mocking"，
+        // 一个真实失败会被放大成整套 49 个错误。isMocked() 在 load 失败后不可靠，故直接 try。
+        try {
+            MockBukkit.unmock();
+        } catch (RuntimeException ignored) {
+            // 已经解绑或从未绑定：无需处理。
+        }
     }
 
     // ═══════════════════════════ 深度边界：钉死 MAX ═══════════════════════════
@@ -548,11 +558,11 @@ class EndVoidRescuePluginTest {
         File folder = plugin.getDataFolder();
         ItemStack enchanted = mendingPickaxe();
 
-        PendingDropStore store = new PendingDropStore(folder, plugin.getLogger());
+        PendingDropStore store = new PendingDropStore(folder, plugin.getLogger(), false);
         store.put(id, List.of(new ItemStack(Material.STONE, 64), enchanted));
         store.save(); // 模拟关服落盘
 
-        PendingDropStore reread = new PendingDropStore(folder, plugin.getLogger()); // 强制从磁盘重载
+        PendingDropStore reread = new PendingDropStore(folder, plugin.getLogger(), false); // 强制从磁盘重载
         List<ItemStack> loaded = reread.get(id);
         assertEquals(2, loaded.size());
         ItemStack reloadedPickaxe = loaded.stream()
@@ -561,7 +571,7 @@ class EndVoidRescuePluginTest {
 
         reread.remove(id);
         reread.save(); // remove 只清内存，磁盘同步必须依赖显式 save 或关服
-        assertTrue(new PendingDropStore(folder, plugin.getLogger()).get(id).isEmpty(), "remove 并落盘后应读回空");
+        assertTrue(new PendingDropStore(folder, plugin.getLogger(), false).get(id).isEmpty(), "remove 并落盘后应读回空");
     }
 
     /**
@@ -581,7 +591,7 @@ class EndVoidRescuePluginTest {
         File file = new File(folder, "pending-drops.yml");
         assertFalse(file.exists(), "前置：本测试开始时不应存在 pending-drops.yml");
 
-        new PendingDropStore(folder, plugin.getLogger()).put(UUID.randomUUID(), List.of());
+        new PendingDropStore(folder, plugin.getLogger(), false).put(UUID.randomUUID(), List.of());
 
         assertFalse(file.exists(), "空 put 且无记录时不得创建 pending-drops.yml");
     }
@@ -604,7 +614,7 @@ class EndVoidRescuePluginTest {
         File file = new File(folder, "pending-drops.yml");
         UUID id = UUID.randomUUID();
 
-        PendingDropStore store = new PendingDropStore(folder, plugin.getLogger());
+        PendingDropStore store = new PendingDropStore(folder, plugin.getLogger(), false);
         store.put(id, List.of(new ItemStack(Material.STONE, 5)));
         assertEquals(1, store.get(id).size(), "前置：put 后内存应有一条记录");
         assertNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players"),
@@ -641,7 +651,7 @@ class EndVoidRescuePluginTest {
     void pendingDropStore_saveFailure_keepsMemoryAndDoesNotThrow() throws Exception {
         File blocked = new File(plugin.getDataFolder(), "not-a-directory");
         assertTrue(blocked.createNewFile(), "前置：用文件占住数据目录，使 save 必然 IOException");
-        PendingDropStore store = new PendingDropStore(blocked, plugin.getLogger());
+        PendingDropStore store = new PendingDropStore(blocked, plugin.getLogger(), false);
         UUID id = UUID.randomUUID();
 
         List<LogRecord> records = captureLogs(
@@ -653,6 +663,174 @@ class EndVoidRescuePluginTest {
         assertEquals(1, countLevel(records, Level.SEVERE, "Unable to save pending drops"),
                 "写盘失败必须记 severe，实际: " + records.stream().map(LogRecord::getMessage).toList());
         assertEquals(3, store.get(id).get(0).getAmount(), "内存主副本在写盘失败后仍必须可读");
+    }
+
+    // ═══════════════════════ 保存时机配置：shutdown / immediate ═══════════════════════
+
+    /**
+     * immediate 模式下 put/remove 各自立即落盘，不需要显式 save() 或关服。
+     * 这是 config.yml 的默认值，也是「跨进程持久化」承诺成立的前提。
+     * 变异：删掉 put/remove 里的 save() 调用后，两处磁盘断言都变红。
+     */
+    @Test
+    void pendingDropStore_immediateMode_writesOnPutAndRemove() {
+        File folder = plugin.getDataFolder();
+        File file = new File(folder, "pending-drops.yml");
+        UUID id = UUID.randomUUID();
+        PendingDropStore store = new PendingDropStore(folder, plugin.getLogger(), true);
+
+        store.put(id, List.of(new ItemStack(Material.STONE, 5)));
+        assertNotNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players." + id),
+                "immediate 模式：put 必须立即落盘，无需 save()");
+
+        store.remove(id);
+        assertNull(YamlConfiguration.loadConfiguration(file).getConfigurationSection("players"),
+                "immediate 模式：remove 必须立即落盘，且不得残留空 players 段");
+    }
+
+    /**
+     * immediate 模式下「空 put 且无记录」仍然早退，不得创建文件。
+     * 变异：把 put 开头的早退分支删掉后，immediate 会立刻写出一个空 players 段。
+     */
+    @Test
+    void pendingDropStore_immediateMode_emptyPutWithoutRecord_stillSkipsWrite() {
+        File folder = plugin.getDataFolder();
+        File file = new File(folder, "pending-drops.yml");
+        assertFalse(file.exists(), "前置：本测试开始时不应存在 pending-drops.yml");
+
+        new PendingDropStore(folder, plugin.getLogger(), true).put(UUID.randomUUID(), List.of());
+
+        assertFalse(file.exists(), "空 put 且无记录时不得创建 pending-drops.yml");
+    }
+
+    /**
+     * immediate 模式端到端：末地虚空死亡后无需关服，pending-drops.yml 立刻可被新实例读回。
+     * 变异：把 onEnable 里的 save-mode 解析改成恒 false 后，文件不存在、本测试变红。
+     */
+    @Test
+    void saveModeImmediate_deathPersistsWithoutShutdown() throws Exception {
+        reloadPluginWith(testConfig("immediate"));
+        assertTrue(saveImmediately(), "前置：immediate 模式下 store 必须开启立即写盘");
+
+        PlayerMock player = endPlayer("immediate_end");
+        player.getInventory().setItem(0, shulkerWith(List.of(new ItemStack(Material.EMERALD, 4))));
+        killByVoid(player);
+
+        File file = new File(plugin.getDataFolder(), "pending-drops.yml");
+        assertTrue(Files.exists(file.toPath()), "immediate 模式：死亡后必须已落盘，无需关服");
+        List<ItemStack> reloaded = diskStore().get(player.getUniqueId());
+        assertEquals(1, reloaded.size(), "重启后应读回待领取记录");
+        assertEquals(Material.EMERALD, reloaded.get(0).getType());
+        assertEquals(4, reloaded.get(0).getAmount());
+    }
+
+    /**
+     * shutdown 模式端到端：死亡后磁盘上不得出现记录，只有 onDisable 才落盘。
+     * 与 saveModeImmediate_deathPersistsWithoutShutdown 成对，钉住两种模式的差异本身。
+     */
+    @Test
+    void saveModeShutdown_deathDoesNotPersistUntilDisable() throws Exception {
+        assertFalse(saveImmediately(), "前置：默认测试插件应处于 shutdown 模式");
+
+        PlayerMock player = endPlayer("shutdown_end");
+        player.getInventory().setItem(0, shulkerWith(List.of(new ItemStack(Material.EMERALD, 4))));
+        killByVoid(player);
+
+        File file = new File(plugin.getDataFolder(), "pending-drops.yml");
+        assertFalse(Files.exists(file.toPath()), "shutdown 模式：死亡后不得落盘");
+        assertEquals(4, pluginStore().get(player.getUniqueId()).get(0).getAmount(),
+                "记录必须仍在内存主副本里");
+
+        plugin.onDisable();
+        assertTrue(Files.exists(file.toPath()), "关服后必须落盘");
+    }
+
+    /**
+     * save-mode 解析：缺省 → immediate（与 config.yml 默认值一致）；大小写不敏感；
+     * 无法识别的值 → shutdown（保守，不写盘）。
+     * 变异：把 equalsIgnoreCase 改成 equals 后 "IMMEDIATE" 用例变红；
+     * 把默认值从 "immediate" 改成别的后缺省用例变红。
+     */
+    @Test
+    void saveMode_parsing_defaultsToImmediateAndIsCaseInsensitive() throws Exception {
+        reloadPluginWith(testConfig("IMMEDIATE"));
+        assertTrue(saveImmediately(), "save-mode 必须大小写不敏感");
+
+        reloadPluginWith(testConfig("shutdown"));
+        assertFalse(saveImmediately(), "shutdown 必须关闭立即写盘");
+
+        reloadPluginWith(testConfig("not-a-mode"));
+        assertFalse(saveImmediately(), "无法识别的值必须回退为 shutdown（不写盘）");
+
+        YamlConfiguration withoutKey = testConfig("shutdown");
+        withoutKey.set("pending-drops.save-mode", null);
+        reloadPluginWith(withoutKey);
+        assertTrue(saveImmediately(), "缺少 save-mode 时必须回退为 immediate");
+    }
+
+    /**
+     * ensureConfigDefaults 把 jar 内 config.yml 有、玩家 config.yml 缺的键补上并 warning，
+     * 且绝不覆盖玩家已设置的值。
+     * 变异：删掉 config.set 后补键与 warning 断言变红；
+     * 把 contains(path, true) 改成 contains(path) 后，玩家自定义值会被默认值覆盖，本测试变红。
+     */
+    @Test
+    void ensureConfigDefaults_addsMissingKeysWithoutOverwritingExisting() throws Exception {
+        plugin.getConfig().set("pending-drops.save-mode", "shutdown");
+        YamlConfiguration defaults = new YamlConfiguration();
+        defaults.set("pending-drops.save-mode", "immediate");
+        defaults.set("pending-drops.new-key", "added");
+        defaults.set("brand-new-section.child", 7);
+        plugin.getConfig().setDefaults(defaults);
+
+        List<LogRecord> records = captureLogs(this::invokeEnsureConfigDefaults);
+
+        assertEquals("shutdown", plugin.getConfig().getString("pending-drops.save-mode"),
+                "玩家已设置的值不得被默认值覆盖");
+        assertEquals("added", plugin.getConfig().getString("pending-drops.new-key"),
+                "缺失的键必须从默认值补齐");
+        assertEquals(7, plugin.getConfig().getInt("brand-new-section.child"),
+                "缺失的嵌套键必须从默认值补齐");
+        assertEquals(1, countWarnings(records, "Added missing config keys"),
+                "补键必须 warning，实际: " + records.stream().map(LogRecord::getMessage).toList());
+        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                        && r.getMessage().contains("pending-drops.new-key")
+                        && r.getMessage().contains("brand-new-section.child")),
+                "warning 必须列出所有补上的键");
+    }
+
+    /**
+     * 没有默认值（例如 loadWithConfig 注入的配置）时 ensureConfigDefaults 必须安全返回。
+     * 变异：删掉 defaults == null 的早退后，本测试抛 NPE。
+     */
+    @Test
+    void ensureConfigDefaults_withoutDefaults_isNoOp() throws Exception {
+        assertNull(plugin.getConfig().getDefaults(), "前置：loadWithConfig 注入的配置没有默认值");
+        assertDoesNotThrow(this::invokeEnsureConfigDefaults);
+    }
+
+    /**
+     * jar 内 config.yml 必须能被真实加载，且默认值自洽（黑名单、save-mode、burst 全在）。
+     * 这是唯一读真实 config.yml 的测试：其余测试都用 loadWithConfig 注入配置，
+     * 若资源过滤或 YAML 语法坏了，只有这里会红。
+     * 变异：把 config.yml 的 save-mode 改回 shutdown 后，默认值断言变红。
+     */
+    @Test
+    void bundledConfig_loadsWithExpectedDefaults() throws Exception {
+        reloadPluginWithBundledConfig();
+
+        assertEquals("immediate", plugin.getConfig().getString("pending-drops.save-mode"),
+                "config.yml 的默认保存时机应为 immediate");
+        assertTrue(saveImmediately(), "默认配置下 store 必须开启立即写盘");
+        assertEquals(List.of("ELYTRA", "SHULKER_SHELL", "ENDER_CHEST",
+                        "OBSIDIAN", "ENDER_PEARL", "END_CRYSTAL"),
+                plugin.getConfig().getStringList("blacklist"), "黑名单必须与 config.yml 一致");
+        assertEquals(0.5, plugin.getConfig().getDouble("burst.radius"), 1e-9);
+        assertTrue(plugin.getConfig().getBoolean("burst.merge-similar"));
+        assertEquals(10, plugin.getConfig().getInt("burst.pickup-delay-ticks"));
+        assertTrue(plugin.getConfig().getBoolean("remove-non-curse-enchant"));
+        assertEquals("THE_END", plugin.getConfig().getString("trigger-world"));
+        assertEquals("VOID", plugin.getConfig().getString("trigger-cause"));
     }
 
     /** 合并 100 颗石头 → 64+36，总量守恒。 */
@@ -1137,6 +1315,25 @@ class EndVoidRescuePluginTest {
 
     // ═══════════════════════════════ 辅助方法 ═══════════════════════════════
 
+    /**
+     * 构造一份完整的测试配置。用 loadWithConfig 注入而不是读 config.yml：
+     * 测试要钉的是「给定 save-mode 时的行为」，不能随 config.yml 默认值漂移。
+     * 黑名单与 config.yml 保持一致，setUp 里的防御性前置会校验它真的被加载。
+     */
+    private static YamlConfiguration testConfig(String saveMode) {
+        YamlConfiguration config = new YamlConfiguration();
+        config.set("trigger-world", "THE_END");
+        config.set("trigger-cause", "VOID");
+        config.set("pending-drops.save-mode", saveMode);
+        config.set("blacklist", List.of("ELYTRA", "SHULKER_SHELL", "ENDER_CHEST",
+                "OBSIDIAN", "ENDER_PEARL", "END_CRYSTAL"));
+        config.set("remove-non-curse-enchant", true);
+        config.set("burst.radius", 0.5);
+        config.set("burst.merge-similar", true);
+        config.set("burst.pickup-delay-ticks", 10);
+        return config;
+    }
+
     private WorldMock addWorld(String name, World.Environment environment) {
         WorldCreator creator = new WorldCreator(name);
         creator.environment(environment);
@@ -1256,13 +1453,49 @@ class EndVoidRescuePluginTest {
 
     /** 读物理文件另起一份内存 store（不碰插件内存），只在 put/save 已落盘后才有内容可读。 */
     private PendingDropStore diskStore() {
-        return new PendingDropStore(plugin.getDataFolder(), plugin.getLogger());
+        return new PendingDropStore(plugin.getDataFolder(), plugin.getLogger(), false);
     }
 
     private PendingDropStore pluginStore() throws Exception {
         Field field = EndVoidRescuePlugin.class.getDeclaredField("store");
         field.setAccessible(true);
         return (PendingDropStore) field.get(plugin);
+    }
+
+    /** 读取插件 store 的 saveImmediately 标志（生产代码没有 getter，只能反射）。 */
+    private boolean saveImmediately() throws Exception {
+        Field flag = PendingDropStore.class.getDeclaredField("saveImmediately");
+        flag.setAccessible(true);
+        return (boolean) flag.get(pluginStore());
+    }
+
+    /**
+     * 用给定配置在一个全新的 MockBukkit session 里重新加载插件。
+     * 不能只 load 一个新实例：旧实例的监听器仍挂在 HandlerList 上，会先一步消费死亡事件
+     * （把潜影盒从背包里摘掉），新实例只能看到空背包，模式断言全部失真。
+     * 全新 session 同时保证数据目录是干净的（探针实测：每次 mock() 都是新的临时目录）。
+     */
+    private void reloadPluginWith(YamlConfiguration config) {
+        MockBukkit.unmock();
+        server = MockBukkit.mock();
+        plugin = MockBukkit.loadWithConfig(EndVoidRescuePlugin.class, config);
+    }
+
+    /** 用 jar 内真实的 config.yml 重新加载插件（走 saveDefaultConfig + ensureConfigDefaults）。 */
+    private void reloadPluginWithBundledConfig() {
+        MockBukkit.unmock();
+        server = MockBukkit.mock();
+        plugin = MockBukkit.load(EndVoidRescuePlugin.class);
+    }
+
+    private void invokeEnsureConfigDefaults() {
+        try {
+            Method method = EndVoidRescuePlugin.class.getDeclaredMethod("ensureConfigDefaults");
+            method.setAccessible(true);
+            method.invoke(plugin);
+        } catch (ReflectiveOperationException exception) {
+            throw new RuntimeException(exception);
+        }
     }
 
     private void burst(PlayerMock player, Location location, List<ItemStack> items) {
