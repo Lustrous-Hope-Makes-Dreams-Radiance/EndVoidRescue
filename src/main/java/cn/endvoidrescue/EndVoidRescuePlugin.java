@@ -6,7 +6,6 @@ import org.bukkit.Material;
 import org.bukkit.Tag;
 import org.bukkit.World;
 import org.bukkit.block.ShulkerBox;
-import org.bukkit.configuration.Configuration;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
@@ -26,7 +25,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -37,39 +35,18 @@ import java.util.logging.Level;
 public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     private static final int MAX_BUNDLE_DEPTH = 16;
     private final Random random = new Random();
+    private Config config;
     private PendingDropStore store;
     private Set<Material> blacklist;
     private boolean loggedBurstRadiusClamp;
 
     @Override
     public void onEnable() {
-        saveDefaultConfig();
-        ensureConfigDefaults();
-        String saveMode = getConfig().getString("pending-drops.save-mode", "immediate");
-        store = new PendingDropStore(getDataFolder(), getLogger(), "immediate".equalsIgnoreCase(saveMode));
+        config = new Config(this);
+        store = new PendingDropStore(getDataFolder(), getLogger(), config.saveImmediately());
         reloadSettings();
         getServer().getPluginManager().registerEvents(this, this);
         getLogger().info("EndVoidRescue enabled");
-    }
-
-    private void ensureConfigDefaults() {
-        Configuration config = getConfig();
-        Configuration defaults = config.getDefaults();
-        if (defaults == null) {
-            return;
-        }
-        List<String> addedKeys = new ArrayList<>();
-        for (String path : defaults.getKeys(true)) {
-            if (defaults.isConfigurationSection(path) || config.contains(path, true)) {
-                continue;
-            }
-            config.set(path, defaults.get(path));
-            addedKeys.add(path);
-        }
-        if (!addedKeys.isEmpty()) {
-            saveConfig();
-            getLogger().warning("Added missing config keys: " + String.join(", ", addedKeys));
-        }
     }
 
     @Override
@@ -78,15 +55,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     }
 
     private void reloadSettings() {
-        blacklist = EnumSet.noneOf(Material.class);
-        for (String name : getConfig().getStringList("blacklist")) {
-            Material material = Material.matchMaterial(name);
-            if (material != null) {
-                blacklist.add(material);
-            } else {
-                getLogger().warning("Unknown blacklist material: " + name);
-            }
-        }
+        blacklist = config.blacklist();
         loggedBurstRadiusClamp = false;
     }
 
@@ -129,29 +98,11 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     }
 
     private boolean isTriggerDeath(Player player) {
-        if (player.getWorld().getEnvironment() != configuredEnvironment()) {
+        if (player.getWorld().getEnvironment() != config.triggerEnvironment()) {
             return false;
         }
         EntityDamageEvent lastDamageCause = player.getLastDamageCause();
-        return lastDamageCause != null && lastDamageCause.getCause() == configuredCause();
-    }
-
-    private World.Environment configuredEnvironment() {
-        try {
-            String value = getConfig().getString("trigger-world", "THE_END");
-            return World.Environment.valueOf(value == null ? "THE_END" : value);
-        } catch (IllegalArgumentException exception) {
-            return World.Environment.THE_END;
-        }
-    }
-
-    private EntityDamageEvent.DamageCause configuredCause() {
-        try {
-            String value = getConfig().getString("trigger-cause", "VOID");
-            return EntityDamageEvent.DamageCause.valueOf(value == null ? "VOID" : value);
-        } catch (IllegalArgumentException exception) {
-            return EntityDamageEvent.DamageCause.VOID;
-        }
+        return lastDamageCause != null && lastDamageCause.getCause() == config.triggerCause();
     }
 
     private void processInventory(Inventory inventory, List<ItemStack> pending) {
@@ -226,7 +177,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     }
 
     private ItemStack stripNonCurseEnchantments(ItemStack item) {
-        if (!getConfig().getBoolean("remove-non-curse-enchant", true)) {
+        if (!config.removeNonCurseEnchantments()) {
             return item;
         }
         ItemMeta meta = item.getItemMeta();
@@ -273,7 +224,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
     }
 
     private List<ItemStack> mergeIfConfigured(List<ItemStack> items) {
-        if (!getConfig().getBoolean("burst.merge-similar", true)) {
+        if (!config.mergeSimilarItems()) {
             return items;
         }
         List<ItemStack> merged = new ArrayList<>();
@@ -311,7 +262,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
         if (!world.isChunkLoaded(location.getBlockX() >> 4, location.getBlockZ() >> 4)) {
             world.getChunkAt(location);
         }
-        double configuredRadius = Math.max(0.0, getConfig().getDouble("burst.radius", 0.5));
+        double configuredRadius = Math.max(0.0, config.burstRadius());
         double radius = Math.min(configuredRadius, 0.5);
         if (configuredRadius > 0.5 && !loggedBurstRadiusClamp) {
             loggedBurstRadiusClamp = true;
@@ -319,7 +270,7 @@ public class EndVoidRescuePlugin extends JavaPlugin implements Listener {
                     + " exceeds the in-block limit 0.5 and was clamped to 0.5 "
                     + "so items stay inside the respawn block and do not clip into adjacent walls");
         }
-        int pickupDelay = Math.max(0, getConfig().getInt("burst.pickup-delay-ticks", 10));
+        int pickupDelay = Math.max(0, config.pickupDelayTicks());
         double centerX = location.getBlockX() + 0.5;
         double centerZ = location.getBlockZ() + 0.5;
         double dropY = location.getY() + 1.0;
