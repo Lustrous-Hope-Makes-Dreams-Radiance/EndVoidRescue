@@ -46,6 +46,8 @@ plugins/EndVoidRescue/config.yml
 ```yaml
 trigger-world: THE_END
 trigger-cause: VOID
+pending-drops:
+  save-mode: immediate
 blacklist:
   - ELYTRA
   - SHULKER_SHELL
@@ -64,6 +66,7 @@ burst:
 
 - `trigger-world`：触发救援的世界环境，使用 Bukkit 的 `World.Environment` 名称。
 - `trigger-cause`：触发救援的死亡原因，使用 Bukkit 的 `DamageCause` 名称。
+- `pending-drops.save-mode`：待返还物品的保存时机。`immediate`（默认）在死亡或重生处理后立即保存；`shutdown` 仅在插件关闭时保存。
 - `blacklist`：死亡时直接丢弃的材料名称列表。
 - `remove-non-curse-enchant`：是否启用经验修补触发的砂轮式祛魔规则。
 - `burst.radius`：重生点所在格内的水平散落程度（格）。有效上限 `0.5`，更大的值会被截断，避免物品落到邻格卡墙。
@@ -72,7 +75,7 @@ burst:
 
 ## 持久化
 
-待返还物品写入 `plugins/EndVoidRescue/pending-drops.yml`。
+默认情况下，死亡和重生时更新内存中的待返还物品并立即写入 `plugins/EndVoidRescue/pending-drops.yml`；将 `pending-drops.save-mode` 设为 `shutdown` 后，改为仅在插件关闭时写入。启动时读取该文件；`shutdown` 模式下服务器崩溃或被强制终止时，尚未写盘的变更不会保存。旧配置缺少新增键时，插件会补入默认值并记录警告。
 
 ## 文档
 

@@ -16,16 +16,18 @@ final class PendingDropStore {
     private final File file;
     private final YamlConfiguration data;
     private final Logger logger;
+    private final boolean saveImmediately;
 
-    PendingDropStore(File dataFolder, Logger logger) {
+    PendingDropStore(File dataFolder, Logger logger, boolean saveImmediately) {
         this.file = new File(dataFolder, "pending-drops.yml");
         this.data = YamlConfiguration.loadConfiguration(file);
         this.logger = logger;
+        this.saveImmediately = saveImmediately;
     }
 
     synchronized void put(UUID playerId, List<ItemStack> items) {
         String path = "players." + playerId;
-        // 空列表且玩家无记录时，数据无变化，跳过写盘。
+        // 空列表且玩家无记录时，数据无变化。
         if (items.isEmpty() && !data.contains(path)) {
             return;
         }
@@ -37,7 +39,9 @@ final class PendingDropStore {
             // 空列表不留下空记录，否则会被序列化成 "players.<uuid>: {}"。
             pruneEmptyPlayersSection();
         }
-        save();
+        if (saveImmediately) {
+            save();
+        }
     }
 
     synchronized List<ItemStack> get(UUID playerId) {
@@ -60,16 +64,17 @@ final class PendingDropStore {
     synchronized void remove(UUID playerId) {
         String path = "players." + playerId;
         if (!data.contains(path)) {
-            // 没有记录可清理（例如死亡时背包为空），不重写文件：重生/登录事件很频繁。
-            // 仅当残留 "players: {}" 空壳时才清理一次并写盘。
-            if (pruneEmptyPlayersSection()) {
+            // 没有记录可清理（例如死亡时背包为空），只更新内存中的空壳。
+            if (saveImmediately && pruneEmptyPlayersSection()) {
                 save();
             }
             return;
         }
         data.set(path, null);
         pruneEmptyPlayersSection();
-        save();
+        if (saveImmediately) {
+            save();
+        }
     }
 
     /** 所有玩家记录都清空后，把空的 players 段一并删除，避免文件里留下 "players: {}"。返回是否发生了清理。 */
@@ -86,10 +91,8 @@ final class PendingDropStore {
      * 内存中的 data 是主副本，磁盘只是尽力持久化。
      * 写盘失败时记 severe 并留下内存数据：本次进程内仍能领取；
      * 重启后未落盘的记录丢失，是磁盘失败时的必然取舍。
-     * 不得把 IOException 抛回 onPlayerDeath：此时背包已经改完，
-     * 异常会让调用方丢失这份 pending，玩家两头落空。
      */
-    private void save() {
+    synchronized void save() {
         try {
             data.save(file);
         } catch (IOException exception) {
